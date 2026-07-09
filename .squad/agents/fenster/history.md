@@ -81,3 +81,6 @@ SDK 1.4.3 (f7) defines `GapAddressType` in `targets/f7/ble_glue/extra_beacon.h` 
 - **All blockers and major issues: RESOLVED via cross-author fix round (locked out from own fixes per architecture rules)**
 - **Project approved for merge**
 
+### 2026-07-09T18:30:00Z — FAP icon format for Flipper Zero
+
+Flipper FAP icons must be exactly **10×10 px, 1-bit (black & white), non-interlaced PNG**. Generate programmatically with Python + Pillow: `Image.new('1', (10, 10))`, draw pixels, save as `.png`. Reference in `application.fam` via `fap_icon="fluckflock_icon.png"`. Verify with `Image.open(...); print(im.size, im.mode)` — must show `(10, 10) 1`. The `ufbt` icon compiler (fbt/APPMETA step) rejects wrong sizes or bit depths at build time. APPCHK: Target 7, API 87.1.

@@ -6,6 +6,7 @@
 [![Platform: Flipper Zero](https://img.shields.io/badge/platform-Flipper%20Zero-orange)](https://flipperzero.one)
 [![SDK: 1.4.3](https://img.shields.io/badge/SDK-1.4.3-green)](https://github.com/flipperdevices/flipperzero-firmware)
 [![Build: ufbt](https://img.shields.io/badge/build-ufbt-lightgrey)](https://github.com/flipperdevices/flipperzero-ufbt)
+![Host Tests](https://github.com/x3nc0n/flipper-fuzzer/actions/workflows/host-tests.yml/badge.svg)
 
 ---
 
@@ -28,7 +29,7 @@ The goal is to pollute passive, dragnet-style surveillance systems — Wi-Fi MAC
 - **Three-radio coverage**
   - BLE advertising via the Flipper's native BLE stack
   - Sub-GHz via the built-in CC1101 (315 / 433.92 / 868 / 915 MHz, region-filtered)
-  - Wi-Fi via the [official Flipper Wi-Fi Dev Board](https://shop.flipperzero.one/products/wifi-devboard) — auto-detected over UART; gracefully absent otherwise *(Wi-Fi UART protocol is currently stubbed — see [Status](#status))*
+  - Wi-Fi via the [official Flipper Wi-Fi Dev Board](https://shop.flipperzero.one/products/wifi-devboard) — auto-detected over UART; gracefully absent otherwise *(see [Wi-Fi Dev Board](#wi-fi-dev-board) and [Status](#status))*
 
 - **Plausible identifier generation**
   - BLE MACs: locally-administered random-static addresses (bit 1 of first octet set, bit 0 clear) — spec-correct for BLE random addressing
@@ -53,13 +54,13 @@ The goal is to pollute passive, dragnet-style surveillance systems — Wi-Fi MAC
 
 | Component | Status |
 |---|---|
-| BLE advertising | ✅ Working |
-| Sub-GHz (CC1101) | ✅ Working |
-| Wi-Fi beacon (dev board) | 🚧 Stubbed — UART protocol TODO |
+| BLE advertising | ✅ Verified on real hardware |
+| Sub-GHz (CC1101) | ✅ Verified on real hardware |
+| Wi-Fi beacon (dev board) | 🧪 Implemented + host-tested; on-device validation pending |
 | ufbt build (SDK 1.4.3) | ✅ Clean (`-Wall -Werror`) |
 | Host unit test suite | ✅ ~71 k assertions, all pass |
 
-Wi-Fi: `radio_wifi_emit()` has a full interface and the dev-board detection / UART init path is in place, but the command protocol for triggering actual beacon injection is not yet implemented. The BLE and Sub-GHz radios are fully functional.
+Wi-Fi: `radio_wifi_emit()` is fully implemented — the UART handshake-based dev-board detection, per-beacon `FFB` commands over the `wifi_proto` line protocol, and the ESP32-S2 companion firmware (`esp32/fluckflock_companion/`) are all in place and host-tested (236 protocol assertions). **On-device validation is still pending** — the ESP32 companion firmware has not yet been flashed due to a USB enumeration issue on the development machine. BLE and Sub-GHz have been confirmed working on a real Flipper Zero (FAP deployed over USB; emission counters climbing on-device).
 
 ---
 
@@ -126,17 +127,36 @@ flipper-fuzzer/
 │       ├── radio/
 │       │   ├── radio_ble.c / .h     # BLE advertising driver
 │       │   ├── radio_subghz.c / .h  # Sub-GHz (CC1101) driver
-│       │   └── radio_wifi.c / .h    # Wi-Fi dev board driver (stub)
+│       │   ├── radio_wifi.c / .h    # Wi-Fi dev board driver (furi_hal_serial UART, handshake + per-beacon emit)
+│       │   └── wifi_proto.c / .h    # UART line-protocol builders (pure C, no Flipper SDK — host-testable)
 │       └── scenes/
 │           ├── scene_main_menu.c    # Main menu
 │           ├── scene_running.c      # Live-counter running scene
 │           ├── scene_settings.c     # Rotation interval settings
 │           └── scene_about.c        # About / disclaimer
+├── esp32/
+│   └── fluckflock_companion/        # ESP32-S2 companion firmware (PlatformIO, board: esp32-s2-saola-1)
+│       ├── src/main.cpp             # Parses UART protocol, injects raw 802.11 beacons via esp_wifi_80211_tx
+│       ├── platformio.ini           # PlatformIO project config
+│       └── README.md                # Flashing instructions and protocol reference
 └── test/
     ├── test_identifiers.c           # Host tests for identifier generators
     ├── test_prng.c                  # Host tests for PRNG determinism
+    ├── test_wifi_proto.c            # Host tests for UART protocol builders (236 assertions)
     └── Makefile                     # Host build — no Flipper SDK required
 ```
+
+---
+
+## Wi-Fi Dev Board
+
+Wi-Fi beacon injection requires the [official Flipper Wi-Fi Dev Board](https://shop.flipperzero.one/products/wifi-devboard) (ESP32-S2-WROVER-I). Setup is two-part:
+
+1. **Flash the companion firmware** — the `esp32/fluckflock_companion/` directory is a PlatformIO project targeting the `esp32-s2-saola-1` board. Open it in VS Code with the PlatformIO extension (or run `pio run --target upload`) to build and flash it. See [`esp32/fluckflock_companion/README.md`](esp32/fluckflock_companion/README.md) for full flashing instructions.
+
+2. **Mount and run** — with the companion firmware flashed, plug the dev board onto the Flipper's expansion header. The FAP auto-detects it at startup via a UART handshake (`FF?` / `FF!`) and enables the Wi-Fi toggle in the UI. No manual configuration required.
+
+> **⚠️ On-device validation pending.** The companion firmware has been implemented and all protocol logic is host-tested (236 assertions pass), but end-to-end beacon injection on the physical dev board has not yet been validated. A USB enumeration issue on the development machine is blocking the initial flash. This section will be updated once on-device testing is complete.
 
 ---
 

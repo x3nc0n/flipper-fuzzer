@@ -72,3 +72,13 @@ See orchestration-log and session log for full deployment details.
 
 - Authored `README.md` at repo root for the public GitHub release of FluckFlock under the MIT license.
 
+## Learnings
+
+### 2026-07-09: README updated — Wi-Fi implemented-but-not-hardware-validated; CI badge added
+
+- Status table now reflects real state: BLE + Sub-GHz marked ✅ verified on real hardware; Wi-Fi row changed from 🚧 stubbed to 🧪 implemented + host-tested, pending on-device validation.
+- Stale "UART protocol is currently stubbed" and "command protocol not yet implemented" language replaced with accurate description of the `wifi_proto` line protocol, ESP32-S2 companion firmware, and honest caveat that on-device flash is blocked by USB enumeration issue.
+- File tree updated: `radio_wifi.c` no longer marked stub; `wifi_proto.c/.h`, `test_wifi_proto.c`, and `esp32/fluckflock_companion/` added.
+- New "Wi-Fi Dev Board" subsection added covering two-part setup (flash PlatformIO companion, then mount board).
+- Host Tests CI badge (`host-tests.yml`) added beneath existing badges.
+

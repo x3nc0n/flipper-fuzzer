@@ -10,6 +10,12 @@
 
 <!-- Append new learnings below. Each entry is something lasting about the project. -->
 
+### 2026-07-09 — Host-test CI added at `.github/workflows/host-tests.yml`
+
+**Author:** Hockney
+
+GitHub Actions workflow created to run the host test suite on every push and pull_request to `master`, and on `workflow_dispatch`. Runs on `ubuntu-latest`; installs `build-essential` to ensure `gcc` and `make` are present, then executes `make test` from the `test/` working directory. The `make test` target builds all three test binaries (`test_prng`, `test_identifiers`, `test_wifi_proto`) and runs them in sequence; a non-zero exit from any binary fails the workflow. No changes were made to the Makefile or tests — `make test` was already the correct invocation.
+
 ### 2026-07-09 — Host-side test suite created and verified passing
 
 **Author:** Hockney
