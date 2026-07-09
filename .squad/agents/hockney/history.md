@@ -116,6 +116,62 @@ furi_hal_subghz_load_custom_preset(subghz_device_cc1101_preset_ook_270khz_async_
 `furi_hal_subghz_acquire()` / `furi_hal_subghz_release()` also **do not exist** in this SDK.
 Guard CC1101 state with `reset → idle` before config and `idle → sleep` after use.
 
+### 2026-07-09 — Wi-Fi protocol host test coverage added
+
+**Author:** Hockney
+**Status:** All tests compiled clean (no warnings) and passed.
+
+#### New file: `test/test_wifi_proto.c`
+
+Tests the pure-C `wifi_proto` module (`radio/wifi_proto.h` / `wifi_proto.c`).
+No Flipper SDK dependency — compiles and runs on any host with gcc/clang.
+
+**16 test functions, 236 assertions — all PASS.**
+
+| Test function | What it asserts |
+|---|---|
+| `handshake_exact_string` | `build_handshake` writes exactly `"FF?\n"`, returns 4, null-terminated; sentinel beyond is untouched |
+| `on_exact_string` | `build_on` writes exactly `"FFON\n"`, returns 5, null-terminated |
+| `off_exact_string` | `build_off` writes exactly `"FFOFF\n"`, returns 6, null-terminated |
+| `simple_builders_too_small_buf` | Each builder returns 0 when buf_len is one byte too small; no bytes past the declared buf_len are written |
+| `simple_builders_exact_fit_buf` | Each builder succeeds when buf_len == required (exact fit) |
+| `beacon_known_ssid_and_bssid` | bssid `AA:BB:CC:DD:EE:FF` + ssid `"TestNet"` → `"FFB aabbccddeeff TestNet\n"` (25 bytes) |
+| `beacon_bssid_byte_order` | `{0x12,0x34,0x56,0x78,0x9A,0xBC}` → `"FFB 123456789abc X\n"` — bssid[0] maps to leftmost hex pair |
+| `beacon_hex_edge_bytes` | `{0x00,0x0f,0xa5,0xff,0x10,0xf0}` → `"000fa5ff10f0"` — leading zeros preserved, all lowercase |
+| `beacon_all_zero_bssid` | `{0x00…}` → `"000000000000"` (12 zeros) |
+| `beacon_all_ff_bssid` | `{0xff…}` → `"ffffffffffff"` (lowercase) |
+| `beacon_too_small_buf` | buf_len=4 returns 0; buf_len one byte short returns 0; exact-fit buf_len succeeds; no sentinel overrun in any case |
+| `beacon_ssid_one_char` | 1-char SSID (`"X"`) frames correctly → 19-byte output |
+| `beacon_ssid_max_length` | 32-char SSID frames correctly → exactly `WIFI_PROTO_BEACON_CMD_MAX_LEN` (50) bytes |
+| `beacon_ssid_too_long` | 33-char SSID → returns 0 (rejected per spec 1–32 byte rule) |
+| `beacon_ssid_empty` | Empty SSID (`""`) → returns 0 |
+| `beacon_ssid_appended_verbatim` | SSID with special chars appended without escaping |
+
+#### Makefile changes (`test/Makefile`)
+
+- Added `-I../flipperzero/fluckflock/radio` to `CFLAGS`.
+- Added `WIFI_PROTO_BIN := test_wifi_proto` target that compiles `test_wifi_proto.c` + `radio/wifi_proto.c` only (no generators, no PRNG needed).
+- `all` and `test` targets extended to include `test_wifi_proto`.
+- `clean` extended to remove `test_wifi_proto` binary.
+
+#### How to run
+
+```
+cd test && make test
+# or with WSL on Windows:
+wsl bash -c "cd /mnt/c/Users/jspai/.source/GitHub/flipper-fuzzer/test && make clean && make test"
+```
+
+#### Run results (2026-07-09)
+
+- `test_prng`: 48 115 assertions — **all PASSED**
+- `test_identifiers`: 23 541 assertions — **all PASSED**
+- `test_wifi_proto`: 236 assertions — **all PASSED**
+
+No bugs found in `wifi_proto.c`. McManus's implementation is clean.
+
+---
+
 ### 2026-07-09 — FINAL OUTCOME
 
 - **ufbt build against Flipper SDK 1.4.3: SUCCEEDS**
@@ -124,4 +180,11 @@ Guard CC1101 state with `reset → idle` before config and `idle → sleep` afte
   - `scenes.c` SceneManagerHandlers type error — FIXED (restructured arrays per SDK pattern)
   - `radio_subghz.c` acquire/release — FIXED (added calls to guard CC1101 access)
 - **Project approved for merge**
+
+### 2026-07-09 — Real hardware validation: FAP confirmed working on Flipper Zero
+
+Deployed to physical Flipper Zero over USB COM5 via `ufbt launch` (Windows + SDK 1.4.3).
+User visually confirmed app running with live BLE + Sub-GHz emission counters incrementing.
+Wi-Fi companion firmware implemented but dev board not yet physically available for testing.
+See orchestration-log and session log for full deployment details.
 

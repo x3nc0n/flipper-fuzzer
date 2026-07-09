@@ -33,10 +33,42 @@ Full verdict written to `.squad/decisions.md` (merged from inbox).
 
 **Passed checks:** chaff_engine.h verbatim match, all generator/radio signatures correct, BSSID/BLE MAC address bits correct, Wi-Fi gated properly, generators pure, PRNG deterministic, host tests comprehensive, application.fam correct.
 
-### 2026-07-09: FINAL OUTCOME
+
+### 2026-07-09: Wi-Fi Implementation Review — APPROVE
+
+Reviewed McManus's Wi-Fi dev-board implementation:
+- `flipperzero/fluckflock/radio/wifi_proto.h` + `wifi_proto.c` (pure-C protocol module)
+- `flipperzero/fluckflock/radio/radio_wifi.c` (full UART driver, replacing stub)
+- `esp32/fluckflock_companion/src/main.cpp` + `platformio.ini` + `README.md`
+
+**Verdict: APPROVE — no blockers.**
+
+Flipper-side driver is correct: furi_hal_serial acquire/init/tx/async_rx/release ordering valid, NULL handle guarded, detect timeout safe (furi_semaphore 400 ms, all paths free resources), no leaks, deinit ordering correct (FFOFF before serial_deinit). Protocol constants consistent host ↔ companion. Beacon frame layout is structurally valid 802.11. `radio_wifi_emit(ssid, bssid)` call in chaff_engine.c matches implemented signature.
+
+Three MEDIUM-confidence ESP32-side observations (not blockers): `Serial.println()` sends `\r\n` (works with prefix-only check), `en_sys_seq=false` gives seq=0 on all frames (harmless for chaff), non-idempotent init in `wifi_injection_start()` (harmless since FFON is sent once).
+
+One MINOR doc issue: stale "Currently stubbed" comment in `radio_wifi.h` — assigned to Fenster/Hockney as a cleanup one-liner.
+
+**Docs updated:**
+- `task-flipper.md` — Wi-Fi section: checked off 7 completed items, left 4 items unchecked (host tests, UI toggle, on-device validation, channel-hopping), added new TODO items.
+- `spec.md` — Section 5.3: replaced "if present" stub description with full implemented approach (UART protocol, companion firmware, beacon frame injection, fixed channel limitation).
+
+Full verdict at `.squad/decisions/inbox/keaton-wifi-review.md`.
+
 
 - **ufbt build against Flipper SDK 1.4.3: SUCCEEDS**
 - **Host test suite (~71k assertions): all PASS**
 - **All blockers and major issues: RESOLVED via cross-author fix round**
 - **Project approved for merge**
+
+### 2026-07-09: Real hardware validation: FAP confirmed working on Flipper Zero
+
+Deployed to physical Flipper Zero over USB COM5 via `ufbt launch` (Windows + SDK 1.4.3).
+User visually confirmed app running with live BLE + Sub-GHz emission counters incrementing.
+Wi-Fi companion firmware implemented but dev board not yet physically available for testing.
+See orchestration-log and session log for full deployment details.
+
+### 2026-07-09: Public README authored for MIT open-source release
+
+- Authored `README.md` at repo root for the public GitHub release of FluckFlock under the MIT license.
 

@@ -61,13 +61,16 @@ FluckFlock targets **passive / dragnet-style surveillance** that relies on:
 
 ### 5.3 Wi-Fi via Dev Board (Optional)
 
-- **Gated on detection** of the official Flipper Wi-Fi Dev Board (ESP32) over UART.
-- If present:
-  - Command the ESP32 to broadcast beacon frames with:
-    - A **plausible SSID** (realistic patterns: "Starbucks WiFi", "HOME-A3F2", "ATT-WIFI-5G", "eduroam", short random names).
-    - A **plausible BSSID** using a real-world OUI prefix (from a built-in table of common AP vendor OUIs) plus random trailing octets.
-  - Rotate SSID + BSSID every cycle.
-- If absent: the Wi-Fi radio toggle is disabled/hidden in the UI. The app runs with BLE + Sub-GHz only.
+- **Gated on detection** of the official Flipper Wi-Fi Dev Board (ESP32-S2-WROVER-I) over UART.
+- **Detection:** At app start the Flipper sends `FF?\n` on the expansion-header USART (FuriHalSerialIdUsart, GPIO 13 TX / GPIO 14 RX, 115200 8N1) and waits up to 400 ms for the companion to reply with an `FF!` prefix. If no board responds, Wi-Fi is silently disabled for the session.
+- **UART protocol:** ASCII line-oriented, `\n`-terminated, Flipper always the host. Commands: `FF?` (detect), `FFON` (enter injection mode), `FFOFF` (exit injection mode), `FFB <bssid12hex> <ssid>` (beacon, fire-and-forget). Frame builders live in `wifi_proto.h` / `wifi_proto.c` (pure C, no Flipper SDK dependency, host-testable).
+- **Companion firmware:** `esp32/fluckflock_companion/` — PlatformIO / Arduino + ESP-IDF targeting the ESP32-S2. On `FFON`, enters 802.11 promiscuous mode (required for `esp_wifi_80211_tx`) on a configured channel (default ch 6, compile-time `FLUCKFLOCK_CHANNEL`). On `FFOFF`, exits injection mode.
+- **Beacon injection:** For each chaff cycle the Flipper sends one `FFB` command. The companion builds a minimal 802.11 management beacon (24-byte MAC header, 12-byte fixed params, SSID tagged element, supported rates IE, DS parameter IE) and calls `esp_wifi_80211_tx(WIFI_IF_STA, frame, len, false)`.
+- **Identifier plausibility:** Same pools as other radios — plausible SSID strings drawn from the `chaff_generate_ssid` table; BSSID = vendor OUI prefix + 3 random bytes via `chaff_generate_bssid`.
+- **Rotation:** SSID + BSSID rotate every chaff cycle, same cadence as BLE / Sub-GHz.
+- **If board absent:** the Wi-Fi radio toggle is disabled/hidden in the UI. The app runs with BLE + Sub-GHz only. No errors are surfaced to the user.
+- **Limitation:** Channel is fixed at compile time (`FLUCKFLOCK_CHANNEL`, default 6). Per-emission or timed channel-hopping is not yet implemented.
+- **Legal / safety note:** 802.11 frame injection is regulated. Users are responsible for compliance with local laws. The app's first-launch disclaimer applies. See `esp32/fluckflock_companion/README.md`.
 
 ## 6. Identifier Plausibility Requirements
 

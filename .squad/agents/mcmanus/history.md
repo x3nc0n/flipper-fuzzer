@@ -87,6 +87,36 @@ Note: radio_wifi.h was pre-stubbed by another agent with `radio_wifi_send(ssid, 
 McManus updated it to `radio_wifi_emit(ssid, bssid)` for naming consistency.
 Fenster must use the updated header.
 
+### 2026-07-09 — Wi-Fi Dev Board: UART protocol, driver, and companion firmware implemented
+
+**Serial API (SDK 1.4.3, verified):**
+- `furi_hal_serial_control_acquire(FuriHalSerialIdUsart)` / `_release(h)` for handle lifecycle.
+- `furi_hal_serial_init(h, 115200)` / `furi_hal_serial_deinit(h)`.
+- TX: `furi_hal_serial_tx(h, buf, len)` + `furi_hal_serial_tx_wait_complete(h)`.
+- RX for handshake: `furi_hal_serial_async_rx_start(h, cb, ctx, false)` — callback runs in
+  interrupt context; must call `furi_hal_serial_async_rx_available()` and
+  `furi_hal_serial_async_rx()` **only from within that callback**.  Signal main thread via
+  `FuriSemaphore` (alloc/release from ISR is safe; acquire with timeout on main thread).
+- `furi_hal_serial_async_rx_stop(h)` to stop.
+- Acquiring USART suspends the Flipper serial console — expected for dev-board apps.
+
+**Protocol (ASCII, newline-terminated, 115200 8N1):**
+- `FF?\n` → `FF!v1\n` — handshake/detect (400 ms timeout).
+- `FFON\n` → `OK\n` — enter injection mode (init).
+- `FFOFF\n` → `OK\n` — exit injection mode (deinit, fire-and-forget).
+- `FFB <bssid12hexlower> <ssid>\n` — inject one beacon (fire-and-forget).
+
+**Protocol module:** `flipperzero/fluckflock/radio/wifi_proto.h` + `wifi_proto.c` — pure C,
+no Flipper SDK, host-testable.  Four functions: `wifi_proto_build_handshake`,
+`wifi_proto_build_on`, `wifi_proto_build_off`, `wifi_proto_build_beacon`.
+
+**Companion firmware:** `esp32/fluckflock_companion/` — PlatformIO, `esp32-s2-saola-1`,
+framework=arduino.  Parses the line protocol, uses `esp_wifi_80211_tx(WIFI_IF_STA, ...)` for
+injection after `esp_wifi_set_promiscuous(true)`.  Debug output on USB CDC (`Serial0`),
+Flipper UART on `Serial` (pins 43 TX / 44 RX → Flipper GPIO 14 RX / 13 TX).
+
+---
+
 ### 2026-07-09 — Correct notification include path in SDK 1.4.3 (f7)
 
 `notification/notification_app.h` does **not** exist in Flipper SDK 1.4.3.  The correct
@@ -100,4 +130,11 @@ includes are:
 `NotificationApp` (opaque struct) and `notification_message()` live in `notification.h`.
 `notification_messages.h` provides the pre-built sequences (e.g. `&sequence_blink_red_10`).
 Verified via: `/home/x3nc0n/.ufbt/current/sdk_headers/f7_sdk/applications/services/notification/notification.h`.
+
+### 2026-07-09 — Real hardware validation: FAP confirmed working on Flipper Zero
+
+Deployed to physical Flipper Zero over USB COM5 via `ufbt launch` (Windows + SDK 1.4.3).
+User visually confirmed app running with live BLE + Sub-GHz emission counters incrementing.
+Wi-Fi companion firmware implemented but dev board not yet physically available for testing.
+See orchestration-log and session log for full deployment details.
 

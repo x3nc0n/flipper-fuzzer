@@ -241,6 +241,245 @@ All three emit functions follow consistent pattern. See **Radio Driver Signature
 
 ---
 
+### 2026-07-09: Review — FluckFlock Wi-Fi UART Implementation
+
+**By:** Keaton (Lead / Firmware Architect)  
+**Date:** 2026-07-09  
+**Reviewing:** McManus's Wi-Fi dev-board implementation (radio_wifi.c, wifi_proto.h/c, esp32/fluckflock_companion/)  
+**Verdict:** ✅ APPROVE — no blockers found
+
+#### Summary
+
+The Flipper-side driver builds clean under ufbt SDK 1.4.3 (confirmed in PR description).  
+All `furi_hal_serial_*` usage is correct. The detect handshake is timeout-safe. The ESP32  
+companion's beacon frame construction is structurally valid 802.11. Protocol constants are  
+consistent across host and companion. No HIGH-confidence issues were found.
+
+#### Detailed Findings
+
+**Flipper Side (`radio_wifi.c`)**
+
+| Check | Result |
+|---|---|
+| acquire → init → (use) → deinit → release ordering in detect() | ✓ Correct |
+| acquire → init → (use) in init(); deinit → release in deinit() | ✓ Correct |
+| NULL handle guard after acquire (busy USART → return false) | ✓ radio_wifi_detect() and radio_wifi_init() both check |
+| Double-acquire guard in radio_wifi_init() | ✓ `wifi_initialized` and `wifi_serial` guards prevent re-entry |
+| No leak on semaphore alloc failure in wifi_do_detect() | ✓ Early return before alloc; no resource held at that point |
+| async_rx_start / async_rx_stop symmetric around semaphore wait | ✓ Both paths (timeout and success) call rx_stop + sem_free |
+| async_rx / async_rx_available called only from callback | ✓ Both in wifi_rx_callback only |
+| tx_wait_complete called after every tx | ✓ wifi_tx_str() wraps both |
+| deinit ordering: FFOFF sent before serial_deinit | ✓ Correct |
+
+**detect() timeout logic — PASS**  
+Uses `furi_semaphore_acquire(…, furi_ms_to_ticks(400))`. On timeout `status != FuriStatusOk` → returns false cleanly. Async RX and semaphore are freed on all paths. No blocking-forever risk.
+
+**Semaphore max-count saturation in callback — PASS**  
+Semaphore allocated with max_count=1. If the callback fires again after releasing (before async_rx_stop), the second `furi_semaphore_release` returns FuriStatusErrorResource and does not over-count. Buffer remains intact.
+
+**chaff_engine.c — radio_wifi_emit call site — PASS**  
+`radio_wifi_emit(ssid, bssid)` at line 209 matches the function signature in radio_wifi.h. SSID is null-terminated via `chaff_generate_ssid`; BSSID is a 6-byte array from `chaff_generate_bssid`. Arguments are correctly ordered.
+
+**ESP32 Companion (`esp32/fluckflock_companion/src/main.cpp`)**
+
+**802.11 Beacon Frame Construction — PASS (medium confidence; can't compile ESP32 here)**
+
+Frame layout in `build_beacon()`:
+- Frame Control `0x80 0x00` → Mgmt type (0), Beacon subtype (8) ✓
+- DA = broadcast `ff:ff:ff:ff:ff:ff` ✓
+- SA (offset 10) = BSSID patched at runtime ✓
+- BSSID (offset 16) = BSSID patched at runtime ✓
+- Timestamp 8 bytes, Beacon interval 100 TU, Capability 0x0431 (ESS + Short Preamble + Short Slot Time) ✓
+- SSID tagged element (tag=0x00) ✓
+- Supported Rates IE (tag=0x01, 8 rates) ✓
+- DS Parameter Set (tag=0x03, channel) ✓
+- `esp_wifi_80211_tx(WIFI_IF_STA, frame, len, false)` ✓
+
+Header offset arithmetic verified: SA at offset 10, BSSID at offset 16 matches the `BEACON_HDR` layout.  
+Promiscuous mode correctly enabled before injection (`esp_wifi_set_promiscuous(true)`).
+
+**Protocol consistency (host ↔ companion) — PASS**  
+Command strings match across `wifi_proto.h` and `main.cpp`: `FF?`, `FFON`, `FFOFF`, `FFB`.  
+Reply prefixes match: `FF!v1`, `OK`.  
+BSSID encoding: 12 lowercase hex chars, big-endian — consistent.
+
+#### Medium-Confidence Observations (ESP32 side; no fix required to approve)
+
+**M1 — `Serial.println()` sends `\r\n`, spec says `\n`**  
+`process_line()` uses `Serial.println("FF!v1")` which appends `\r\n` rather than just `\n`.  
+The Flipper's `wifi_rx_callback` triggers on `\n`, so `rx.buf` contains `FF!v1\r`. The prefix-only check (`FF!`) is unaffected. *Works correctly with current implementation.* If a future change performs a full string comparison against `WIFI_PROTO_HANDSHAKE_REPLY_V1` ("FF!v1\n"), it would fail on the `\r`. Not a blocker — note for Fenster or Hockney if detection logic is ever hardened.
+
+**M2 — `en_sys_seq=false` → all injected beacons have sequence number 0**  
+`esp_wifi_80211_tx(..., false)` preserves the `0x0000` sequence control field from the template. For chaff purposes this is inconsequential. Using `true` would generate incrementing sequence numbers for more realistic-looking frames. Not a blocker.
+
+**M3 — `wifi_injection_start()` calls non-idempotent init functions**  
+`nvs_flash_init()` and `esp_event_loop_create_default()` return error codes if already initialized. Protocol prevents double-FFON (Flipper only calls FFON once), so this is harmless in practice. Not a blocker.
+
+#### Documentation Issue (minor, no author lock-out constraint)
+
+`radio_wifi.h` — `radio_wifi_detect()` doc block still says:  
+> "NOTE: Currently stubbed to return false — see TODO in radio_wifi.c."
+
+This is stale; the function is fully implemented. McManus is locked out of self-fixes. Either  
+**Fenster** or **Hockney** should update this comment as a one-line cleanup (no logic change).  
+Severity: MINOR / documentation only.
+
+#### Checklist Review
+
+- [x] furi_hal_serial acquire/init/tx/async_rx/release correct
+- [x] NULL handle (busy USART) guarded → returns false
+- [x] No leaks / no double-acquire
+- [x] deinit ordering correct (FFOFF before serial_deinit)
+- [x] detect() timeout-safe, no blocking-forever
+- [x] Beacon frame structurally valid 802.11
+- [x] addr2/addr3 (SA/BSSID) = bssid ✓
+- [x] SSID tagged element present
+- [x] esp_wifi_80211_tx called correctly
+- [x] Protocol strings consistent host ↔ companion
+- [x] radio_wifi_emit called correctly from chaff_engine.c
+
+#### Action Items
+
+| # | Severity | File | Issue | Assigned to |
+|---|---|---|---|---|
+| M1 | Medium | `esp32/.../main.cpp` | `Serial.println` → `\r\n`; consider `Serial.print(…"\n")` for spec compliance | Fenster (cleanup, not blocking) |
+| M2 | Medium | `esp32/.../main.cpp` | Pass `true` to `esp_wifi_80211_tx` for auto seq numbers (more realistic) | Fenster (optional enhancement) |
+| D1 | Minor | `radio/radio_wifi.h` | Remove stale "currently stubbed" comment | Fenster or Hockney (one-liner) |
+
+McManus (original author) is **locked out** of all fix assignments per reviewer-rejection lockout policy. Items above are improvements, not blockers — no lock is triggered since the verdict is APPROVE.
+
+---
+
+### 2026-07-09: Decision — FluckFlock Wi-Fi UART Protocol & Companion Firmware
+
+**By:** McManus (Wireless / RF Dev)  
+**Date:** 2026-07-09  
+**Status:** Final  
+**For:** Keaton (task-flipper.md gating), Hockney (host test authorship)
+
+#### 1. UART Line Protocol — Complete Specification
+
+Physical layer: **FuriHalSerialIdUsart**, 115200 baud, 8N1.  
+Pins (Flipper expansion header): GPIO 13 = TX out, GPIO 14 = RX in.  
+All frames are ASCII, newline-terminated (`\n`).  The Flipper is always the host (initiator).
+
+| Flipper → ESP32 | ESP32 → Flipper | Purpose |
+|---|---|---|
+| `FF?\n` | `FF!v1\n` | Handshake / board detection (used by `radio_wifi_detect()`) |
+| `FFON\n` | `OK\n` | Enter 802.11 raw-injection mode (sent by `radio_wifi_init()`) |
+| `FFOFF\n` | `OK\n` | Exit injection mode (sent by `radio_wifi_deinit()`) |
+| `FFB <bssid12> <ssid>\n` | *(none)* | Inject one 802.11 beacon (sent by `radio_wifi_emit()`) |
+
+**Field details:**
+
+- `bssid12`: 12 **lowercase** hex chars, no separators.  
+  Example: `aabbccddeeff` (encoding of `AA:BB:CC:DD:EE:FF`)
+- `ssid`: raw null-terminated SSID, 1–32 printable bytes, no newlines.  
+  The chaff engine always validates this before calling emit().
+- Beacon command is **fire-and-forget** — no ACK is expected from the companion.
+- `FF?` / `FFON` / `FFOFF` replies are used by detect/init paths; the driver waits up to
+  400 ms for the handshake reply, then returns false (board absent / busy).
+
+#### 2. `wifi_proto` Function Signatures (for Hockney's host tests)
+
+File location: `flipperzero/fluckflock/radio/wifi_proto.h` + `wifi_proto.c`
+
+**No Flipper SDK dependencies** — only `<stdint.h>`, `<stddef.h>`, `<string.h>`.
+
+```c
+/* Build "FF?\n" into buf. Returns bytes written (excl. '\0'), or 0 on error. */
+size_t wifi_proto_build_handshake(char* buf, size_t buf_len);
+
+/* Build "FFON\n" into buf. Returns bytes written (excl. '\0'), or 0 on error. */
+size_t wifi_proto_build_on(char* buf, size_t buf_len);
+
+/* Build "FFOFF\n" into buf. Returns bytes written (excl. '\0'), or 0 on error. */
+size_t wifi_proto_build_off(char* buf, size_t buf_len);
+
+/*
+ * Build "FFB <bssid12hex> <ssid>\n" into buf.
+ * bssid:   6-byte array, big-endian (network byte order).
+ * ssid:    null-terminated, 1–32 bytes, no newlines.
+ * Returns: bytes written (excl. '\0'), or 0 on error.
+ * Required buf_len: at least (19 + strlen(ssid)) bytes.
+ * Maximum output length (WIFI_PROTO_BEACON_CMD_MAX_LEN): 50 bytes + '\0'.
+ */
+size_t wifi_proto_build_beacon(
+    char*          buf,
+    size_t         buf_len,
+    const char*    ssid,
+    const uint8_t  bssid[6]);
+```
+
+**Constants defined in `wifi_proto.h`:**
+
+```c
+#define WIFI_PROTO_HANDSHAKE_CMD          "FF?\n"
+#define WIFI_PROTO_HANDSHAKE_REPLY_PREFIX "FF!"
+#define WIFI_PROTO_HANDSHAKE_REPLY_V1     "FF!v1\n"
+#define WIFI_PROTO_ON_CMD                 "FFON\n"
+#define WIFI_PROTO_OFF_CMD                "FFOFF\n"
+#define WIFI_PROTO_OK_REPLY               "OK\n"
+#define WIFI_PROTO_BEACON_CMD_MAX_LEN     50u
+```
+
+#### 3. ESP32 Board Target
+
+| Item | Value |
+|---|---|
+| SoC | ESP32-S2 (Xtensa LX7) |
+| Board | Official Flipper Zero Wi-Fi Dev Board (ESP32-S2-WROVER-I) |
+| PlatformIO board ID | `esp32-s2-saola-1` |
+| Framework | Arduino (espressif32) |
+| Monitor speed | 115200 |
+
+#### 4. UART Pin Mapping
+
+| Flipper Zero GPIO | ESP32-S2 GPIO | Direction | Notes |
+|---|---|---|---|
+| 13 (TX) | 44 (UART0 RX / U0RXD) | Flipper → ESP32 | Flipper transmits; ESP32 receives |
+| 14 (RX) | 43 (UART0 TX / U0TXD) | ESP32 → Flipper | ESP32 replies; Flipper receives |
+| GND | GND | — | Common ground |
+
+The official Flipper Wi-Fi Dev Board mates to the expansion connector directly — no extra 
+wiring required.
+
+Acquiring `FuriHalSerialIdUsart` on the Flipper suspends the Flipper serial console 
+(expected for dev-board apps).
+
+#### 5. Files Created / Modified
+
+| File | Status |
+|---|---|
+| `flipperzero/fluckflock/radio/wifi_proto.h` | **Created** — pure-C protocol module header |
+| `flipperzero/fluckflock/radio/wifi_proto.c` | **Created** — pure-C protocol module implementation |
+| `flipperzero/fluckflock/radio/radio_wifi.c` | **Modified** — full UART driver (replaces stub) |
+| `esp32/fluckflock_companion/platformio.ini` | **Created** — PlatformIO project config |
+| `esp32/fluckflock_companion/src/main.cpp` | **Created** — ESP32-S2 companion firmware |
+| `esp32/fluckflock_companion/README.md` | **Created** — build/flash/wiring/legal docs |
+
+#### 6. SDK Symbols Used (verified against Flipper SDK 1.4.3)
+
+```c
+furi_hal_serial_control_acquire(FuriHalSerialIdUsart)  → FuriHalSerialHandle*
+furi_hal_serial_control_release(FuriHalSerialHandle*)
+furi_hal_serial_init(FuriHalSerialHandle*, uint32_t baud)
+furi_hal_serial_deinit(FuriHalSerialHandle*)
+furi_hal_serial_tx(FuriHalSerialHandle*, const uint8_t*, size_t)
+furi_hal_serial_tx_wait_complete(FuriHalSerialHandle*)
+furi_hal_serial_async_rx_start(handle, callback, context, report_errors)
+furi_hal_serial_async_rx_stop(FuriHalSerialHandle*)
+furi_hal_serial_async_rx_available(FuriHalSerialHandle*)  → bool  [call from callback only]
+furi_hal_serial_async_rx(FuriHalSerialHandle*)            → uint8_t [call from callback only]
+furi_semaphore_alloc(max_count, initial_count)            → FuriSemaphore*
+furi_semaphore_free(FuriSemaphore*)
+furi_semaphore_acquire(FuriSemaphore*, uint32_t timeout)  → FuriStatus
+furi_semaphore_release(FuriSemaphore*)                    → FuriStatus
+furi_ms_to_ticks(uint32_t ms)                             → uint32_t
+```
+
+---
+
 ## Governance
 
 - All meaningful changes require team consensus

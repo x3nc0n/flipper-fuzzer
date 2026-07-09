@@ -3,60 +3,66 @@
 
 /* ---- Widget layout helpers ---- */
 
-// Flipper screen: 128 x 64 px. FontSecondary: ~7px tall. FontPrimary: ~10px tall.
-#define ROW_TITLE  2
-#define ROW_BLE    16
-#define ROW_BLE2   25
-#define ROW_SG     36
-#define ROW_SG2    45
-#define ROW_WIFI   56
+// Flipper screen: 128 x 64 px. FontSecondary: ~8px tall. FontPrimary: ~10px tall.
+// Vertical full-width rows — no two-column layout, prevents wide MAC/SSID overflow.
+#define ROW_TITLE  0
+#define ROW_BLE    11
+#define ROW_BLE2   20
+#define ROW_SG     29
+#define ROW_SG2    38
+#define ROW_WIFI   47
+#define ROW_HINT   56
+
+// FontSecondary is ~6px/char; 21 chars fits within the 128px screen width.
+#define IDENT_MAX_CHARS 21
 
 static void running_rebuild_widget(FluckFlockApp* app) {
     widget_reset(app->widget);
 
     ChaffStats stats;
     char line[48];
+    char ident[IDENT_MAX_CHARS + 1];
 
-    // Title / status bar
+    // Title
     widget_add_string_element(
         app->widget, 64, ROW_TITLE, AlignCenter, AlignTop, FontPrimary, "RUNNING");
 
-    // BLE
+    // BLE — label+count, then identifier on the next line (full width)
     if(chaff_engine_get_radio_enabled(app->chaff_engine, ChaffRadioBLE)) {
         chaff_engine_get_stats(app->chaff_engine, ChaffRadioBLE, &stats);
         snprintf(line, sizeof(line), "BLE %lu", (unsigned long)stats.emitted_count);
         widget_add_string_element(
             app->widget, 0, ROW_BLE, AlignLeft, AlignTop, FontSecondary, line);
-        // Truncate last_ident to fit screen width (~21 chars in FontSecondary)
+        snprintf(ident, sizeof(ident), "%.*s", IDENT_MAX_CHARS, stats.last_ident);
         widget_add_string_element(
-            app->widget, 0, ROW_BLE2, AlignLeft, AlignTop, FontSecondary, stats.last_ident);
+            app->widget, 0, ROW_BLE2, AlignLeft, AlignTop, FontSecondary, ident);
     }
 
-    // Sub-GHz
+    // Sub-GHz — same two-line pattern, full width starting at x=0
     if(chaff_engine_get_radio_enabled(app->chaff_engine, ChaffRadioSubGhz)) {
         chaff_engine_get_stats(app->chaff_engine, ChaffRadioSubGhz, &stats);
         snprintf(line, sizeof(line), "SG %lu", (unsigned long)stats.emitted_count);
         widget_add_string_element(
-            app->widget, 64, ROW_BLE, AlignLeft, AlignTop, FontSecondary, line);
+            app->widget, 0, ROW_SG, AlignLeft, AlignTop, FontSecondary, line);
+        snprintf(ident, sizeof(ident), "%.*s", IDENT_MAX_CHARS, stats.last_ident);
         widget_add_string_element(
-            app->widget, 64, ROW_BLE2, AlignLeft, AlignTop, FontSecondary, stats.last_ident);
+            app->widget, 0, ROW_SG2, AlignLeft, AlignTop, FontSecondary, ident);
     }
 
-    // WiFi (if detected and enabled)
+    // WiFi — count line + truncated SSID line when detected and enabled;
+    // otherwise show Back=Stop hint at the bottom.
     if(app->wifi_detected &&
        chaff_engine_get_radio_enabled(app->chaff_engine, ChaffRadioWifi)) {
         chaff_engine_get_stats(app->chaff_engine, ChaffRadioWifi, &stats);
         snprintf(line, sizeof(line), "WiFi %lu", (unsigned long)stats.emitted_count);
         widget_add_string_element(
             app->widget, 0, ROW_WIFI, AlignLeft, AlignTop, FontSecondary, line);
-        // Show truncated last SSID
+        snprintf(ident, sizeof(ident), "%.*s", IDENT_MAX_CHARS, stats.last_ident);
         widget_add_string_element(
-            app->widget, 50, ROW_WIFI, AlignLeft, AlignTop, FontSecondary, stats.last_ident);
-    } else if(!app->wifi_detected ||
-              !chaff_engine_get_radio_enabled(app->chaff_engine, ChaffRadioWifi)) {
-        // Show hint at bottom
+            app->widget, 0, ROW_HINT, AlignLeft, AlignTop, FontSecondary, ident);
+    } else {
         widget_add_string_element(
-            app->widget, 64, 63, AlignCenter, AlignBottom, FontSecondary, "Back=Stop");
+            app->widget, 64, ROW_HINT, AlignCenter, AlignTop, FontSecondary, "Back=Stop");
     }
 }
 

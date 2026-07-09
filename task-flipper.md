@@ -61,13 +61,18 @@
 
 ## Optional Wi-Fi (Dev Board over UART)
 
-- [ ] Create `radio/radio_wifi.c` + `radio/radio_wifi.h`
-- [ ] `radio_wifi_detect()` → bool — probe UART for ESP32 dev board presence (e.g., send AT or custom handshake, check response within timeout)
-- [ ] `radio_wifi_init()` — open UART, configure baud rate, handshake with ESP32
-- [ ] `radio_wifi_send(ssid, ssid_len, bssid6)` — send command to ESP32 to broadcast a beacon frame with the given SSID and BSSID
-- [ ] `radio_wifi_deinit()` — close UART
-- [ ] Define a simple serial protocol for Flipper ↔ ESP32 commands (or use an existing one if the dev board firmware supports beacon injection)
-- [ ] If dev board not detected: Wi-Fi radio disabled, toggle hidden in UI
+- [x] Create `radio/radio_wifi.c` + `radio/radio_wifi.h` *(McManus, 2026-07-09)*
+- [x] `radio_wifi_detect()` → bool — sends `FF?\n`, awaits `FF!` prefix within 400 ms timeout; acquires/inits/releases handle on normal path *(McManus, 2026-07-09)*
+- [x] `radio_wifi_init()` — acquires UART handle, inits 115200 8N1, sends `FFON\n` to companion *(McManus, 2026-07-09)*
+- [x] `radio_wifi_emit(ssid, bssid)` — fire-and-forget `FFB <bssid12hex> <ssid>\n` via UART *(McManus, 2026-07-09)* *(note: function was renamed from `radio_wifi_send` — drop the `ssid_len` param)*
+- [x] `radio_wifi_deinit()` — sends `FFOFF\n`, calls furi_hal_serial_deinit then control_release *(McManus, 2026-07-09)*
+- [x] Define UART line protocol — `wifi_proto.h` / `wifi_proto.c`: pure-C frame builders, all constants; see `mcmanus-wifi-protocol.md` *(McManus, 2026-07-09)*
+- [x] ESP32 companion firmware created — `esp32/fluckflock_companion/` (PlatformIO / Arduino + ESP-IDF, ESP32-S2-WROVER-I, ch 6 default) *(McManus, 2026-07-09)*
+- [ ] Host tests for `wifi_proto.c` frame builders — `test/` coverage of build_handshake / build_on / build_off / build_beacon *(Hockney — pending)*
+- [ ] Wire Wi-Fi toggle into UI: visible only when `radio_wifi_detect()` returns true; hidden otherwise *(Fenster — pending, no UI integration yet)*
+- [ ] On-device hardware validation with a real Flipper Wi-Fi Dev Board *(outstanding — can't verify without hardware)*
+- [ ] Channel-hopping / dynamic channel selection — currently fixed at compile-time (`FLUCKFLOCK_CHANNEL=6`); a future enhancement *(outstanding)*
+- [ ] Clean up stale "Currently stubbed to return false" doc comment in `radio_wifi.h` *(minor — McManus locked out; Fenster or Hockney can do as a cleanup pass)*
 
 ## UI / Menus
 

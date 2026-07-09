@@ -2,135 +2,202 @@
  * radio_wifi.c — Wi-Fi Dev Board (ESP32 via UART) implementation (Flipper Zero).
  *
  * Flipper-only.  Uses furi_hal_serial_* for UART communication with the
- * official Flipper Wi-Fi Dev Board.
+ * official Flipper Wi-Fi Dev Board (ESP32-S2).
  *
- * STUB STATUS:
- *   radio_wifi_detect() → always returns false (see TODO below).
- *   radio_wifi_init()   → no-op stub.
- *   radio_wifi_deinit() → no-op stub.
- *   radio_wifi_emit()   → no-op stub, returns false.
+ * Physical connection:
+ *   - Port:  FuriHalSerialIdUsart (expansion header USART)
+ *   - Baud:  115200 8N1
+ *   - Pins:  Flipper GPIO 13 = TX (→ ESP32 RX), GPIO 14 = RX (← ESP32 TX)
  *
- * This is intentional: the Wi-Fi radio path is optional.  When detect() returns
- * false the chaff engine never enables ChaffRadioWifi and these stubs are never
- * called.  Implement the TODOs when the ESP32 UART protocol is finalised.
+ * NOTE: Acquiring FuriHalSerialIdUsart suspends the Flipper serial console.
+ * This is expected and acceptable for Wi-Fi Dev Board apps.
  *
- * ============================================================================
- * UART PROTOCOL (PROPOSED — finalise with Keaton before implementing):
+ * Protocol: see wifi_proto.h for full spec.
+ *   detect → sends "FF?\n", expects "FF!" prefix within WIFI_DETECT_TIMEOUT_MS.
+ *   init   → acquires handle, sends "FFON\n".
+ *   deinit → sends "FFOFF\n", releases handle.
+ *   emit   → sends "FFB <bssid12hex> <ssid>\n" (fire-and-forget).
  *
- * Physical:
- *   - Port:     FuriHalSerialIdUsart (expansion header USART)
- *   - Baud:     115200 8N1
- *   - Connector: GPIO pins 13 (TX) / 14 (RX) on the Flipper
- *
- * Framing (assumed Marauder-compatible ASCII command protocol):
- *   Detection:  Send "help\n" → expect any response containing "Marauder" or
- *               "FluckFlock" within 500 ms.
- *   Beacon cmd: Send "beacon -s <SSID> -b <XX:XX:XX:XX:XX:XX>\n"
- *               → expect "ACK\n" or empty (fire-and-forget).
- *
- * If the ESP32 runs a custom sketch instead of Marauder, replace the framing
- * with whatever protocol that sketch implements.
- * ============================================================================
- *
- * ASSUMPTIONS:
- *   furi_hal_serial_control_acquire(FuriHalSerialIdUsart) returns a handle.
- *   furi_hal_serial_init(handle, baud) opens the port.
- *   furi_hal_serial_tx(handle, data, size) is fire-and-forget (async).
- *   furi_hal_serial_deinit(handle) + furi_hal_serial_control_release(handle) close it.
+ * SDK symbols verified against Flipper SDK 1.4.3 furi_hal_serial.h /
+ * furi_hal_serial_control.h.
  */
 
 #include "radio_wifi.h"
+#include "wifi_proto.h"
 
 /* Flipper SDK — only compiled on-device */
+#include <furi.h>
 #include <furi_hal_serial.h>
 #include <furi_hal_serial_control.h>
 
 #include <string.h>
-#include <stdio.h>
 
-/* UART baud rate for the dev board */
-#define WIFI_UART_BAUD 115200
+/* ---- Constants ---- */
 
-static FuriHalSerialHandle* wifi_serial = NULL;
+#define WIFI_UART_BAUD          115200u
 
-/* ---- Helpers ---- */
+/* Timeout for the "FF?" → "FF!v1" handshake exchange */
+#define WIFI_DETECT_TIMEOUT_MS  400u
 
-/* Format a BSSID into "XX:XX:XX:XX:XX:XX\0" (18 bytes) */
-static void bssid_to_str(char* out, const uint8_t bssid[6]) {
-    static const char hex[] = "0123456789ABCDEF";
-    for(int i = 0; i < 6; i++) {
-        out[i * 3]     = hex[(bssid[i] >> 4) & 0xF];
-        out[i * 3 + 1] = hex[bssid[i] & 0xF];
-        out[i * 3 + 2] = (i < 5) ? ':' : '\0';
+/* Largest TX buffer needed: "FFB " + 12 hex + " " + 32-char SSID + "\n\0" = 51 */
+#define WIFI_CMD_BUF_SIZE       64u
+
+/* RX scratch buffer for the handshake reply */
+#define WIFI_RX_BUF_SIZE        32u
+
+/* ---- Static state ---- */
+
+static FuriHalSerialHandle* wifi_serial      = NULL;
+static bool                 wifi_initialized = false;
+
+/* ---- RX context (detect handshake) ---- */
+
+/*
+ * Collected in the interrupt-context async-rx callback.
+ * The callback is the only writer; the main thread only reads after the
+ * semaphore has been released, so no additional locking is needed.
+ */
+typedef struct {
+    char             buf[WIFI_RX_BUF_SIZE];
+    volatile uint8_t len;
+    FuriSemaphore*   sem;
+} WifiRxCtx;
+
+/*
+ * Called from interrupt context.
+ * Drains bytes via furi_hal_serial_async_rx (must be called from callback).
+ * Signals the semaphore when a '\n' is received or the buffer is full.
+ */
+static void wifi_rx_callback(
+    FuriHalSerialHandle* handle,
+    FuriHalSerialRxEvent event,
+    void*                context) {
+
+    WifiRxCtx* rx = (WifiRxCtx*)context;
+    if(!(event & FuriHalSerialRxEventData)) return;
+
+    while(furi_hal_serial_async_rx_available(handle)) {
+        uint8_t b = furi_hal_serial_async_rx(handle);
+        if(rx->len < (uint8_t)(WIFI_RX_BUF_SIZE - 1u)) {
+            rx->buf[rx->len++] = (char)b;
+        }
+        if(b == '\n' || rx->len >= (uint8_t)(WIFI_RX_BUF_SIZE - 1u)) {
+            rx->buf[rx->len] = '\0';
+            furi_semaphore_release(rx->sem);
+            return;
+        }
     }
+}
+
+/* ---- Internal TX helper ---- */
+
+static void wifi_tx_str(FuriHalSerialHandle* h, const char* s, size_t len) {
+    furi_hal_serial_tx(h, (const uint8_t*)s, len);
+    furi_hal_serial_tx_wait_complete(h);
+}
+
+/*
+ * Perform a detect handshake on an already-opened handle.
+ * Sends FF?\n, waits up to WIFI_DETECT_TIMEOUT_MS for an "FF!" reply prefix.
+ * Returns true on success.
+ */
+static bool wifi_do_detect(FuriHalSerialHandle* h) {
+    char   cmd[8];
+    size_t cmd_len = wifi_proto_build_handshake(cmd, sizeof(cmd));
+    if(cmd_len == 0u) return false;
+
+    WifiRxCtx rx;
+    memset(&rx, 0, sizeof(rx));
+    rx.sem = furi_semaphore_alloc(1u, 0u);
+    if(!rx.sem) return false;
+
+    furi_hal_serial_async_rx_start(h, wifi_rx_callback, &rx, false);
+    wifi_tx_str(h, cmd, cmd_len);
+
+    FuriStatus status =
+        furi_semaphore_acquire(rx.sem, furi_ms_to_ticks(WIFI_DETECT_TIMEOUT_MS));
+
+    furi_hal_serial_async_rx_stop(h);
+    furi_semaphore_free(rx.sem);
+
+    if(status != FuriStatusOk) return false;
+
+    /* Verify the "FF!" prefix in the reply */
+    return (rx.len >= 3u &&
+            rx.buf[0] == 'F' &&
+            rx.buf[1] == 'F' &&
+            rx.buf[2] == '!');
 }
 
 /* ---- Public API ---- */
 
 bool radio_wifi_detect(void) {
-    /*
-     * TODO: implement actual detection.
-     *
-     * Sketch:
-     *   1. Acquire USART handle.
-     *   2. Open at WIFI_UART_BAUD.
-     *   3. Send "help\n".
-     *   4. Read response with a 500 ms timeout.
-     *   5. Return true if response contains "Marauder" or known marker.
-     *   6. Close UART and release handle before returning.
-     *
-     * For now, always return false so the engine disables Wi-Fi cleanly.
-     */
-    return false;
+    if(wifi_serial) {
+        /*
+         * init() already holds the handle (unusual call order, but handle it).
+         * Reuse the open port — no re-acquire needed.
+         */
+        return wifi_do_detect(wifi_serial);
+    }
+
+    /* Normal path: acquire, probe, release */
+    FuriHalSerialHandle* h =
+        furi_hal_serial_control_acquire(FuriHalSerialIdUsart);
+    if(!h) return false;
+
+    furi_hal_serial_init(h, WIFI_UART_BAUD);
+    bool found = wifi_do_detect(h);
+    furi_hal_serial_deinit(h);
+    furi_hal_serial_control_release(h);
+    return found;
 }
 
 bool radio_wifi_init(void) {
-    if(wifi_serial) return true; /* already open */
+    if(wifi_initialized) return true;
+    if(wifi_serial) return false; /* handle already held without being init'd — shouldn't happen */
 
-    /*
-     * TODO: open UART to dev board.
-     *
-     * wifi_serial = furi_hal_serial_control_acquire(FuriHalSerialIdUsart);
-     * if(!wifi_serial) return false;
-     * furi_hal_serial_init(wifi_serial, WIFI_UART_BAUD);
-     */
+    wifi_serial = furi_hal_serial_control_acquire(FuriHalSerialIdUsart);
+    if(!wifi_serial) return false;
 
-    return false; /* stub: no board support yet */
+    furi_hal_serial_init(wifi_serial, WIFI_UART_BAUD);
+
+    /* Tell the companion to enter raw-injection mode */
+    char   cmd[8];
+    size_t len = wifi_proto_build_on(cmd, sizeof(cmd));
+    if(len > 0u) {
+        wifi_tx_str(wifi_serial, cmd, len);
+    }
+
+    wifi_initialized = true;
+    return true;
 }
 
 void radio_wifi_deinit(void) {
     if(!wifi_serial) return;
 
-    /*
-     * TODO: close UART.
-     *
-     * furi_hal_serial_deinit(wifi_serial);
-     * furi_hal_serial_control_release(wifi_serial);
-     * wifi_serial = NULL;
-     */
+    if(wifi_initialized) {
+        /* Tell companion to exit injection mode before closing the port */
+        char   cmd[8];
+        size_t len = wifi_proto_build_off(cmd, sizeof(cmd));
+        if(len > 0u) {
+            wifi_tx_str(wifi_serial, cmd, len);
+        }
+        wifi_initialized = false;
+    }
+
+    furi_hal_serial_deinit(wifi_serial);
+    furi_hal_serial_control_release(wifi_serial);
+    wifi_serial = NULL;
 }
 
 bool radio_wifi_emit(const char* ssid, const uint8_t bssid[6]) {
-    if(!wifi_serial) return false;
+    if(!wifi_serial || !wifi_initialized) return false;
     if(!ssid || ssid[0] == '\0') return false;
 
-    /*
-     * TODO: send beacon command to ESP32.
-     *
-     * char bssid_str[18];
-     * bssid_to_str(bssid_str, bssid);
-     *
-     * char cmd[80];
-     * int len = snprintf(cmd, sizeof(cmd), "beacon -s %s -b %s\n", ssid, bssid_str);
-     * if(len < 0 || (size_t)len >= sizeof(cmd)) return false;
-     *
-     * furi_hal_serial_tx(wifi_serial, (const uint8_t*)cmd, (size_t)len);
-     *
-     * Optionally wait for "ACK\n" with a short timeout (~100 ms).
-     * For fire-and-forget, just return true after tx.
-     */
+    char   cmd[WIFI_CMD_BUF_SIZE];
+    size_t len = wifi_proto_build_beacon(cmd, sizeof(cmd), ssid, bssid);
+    if(len == 0u) return false;
 
-    (void)bssid;        /* intentionally stubbed — board not yet supported */
-    (void)bssid_to_str; /* suppress unused warning while stubbed */
-    return false;       /* stub: not implemented */
+    wifi_tx_str(wifi_serial, cmd, len);
+    return true;
 }

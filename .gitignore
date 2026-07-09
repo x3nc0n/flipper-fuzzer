@@ -16,4 +16,5 @@ flipperzero/**/.vscode/
 # Host test build artifacts
 test/test_prng
 test/test_identifiers
+test/test_wifi_proto
 test/*.o

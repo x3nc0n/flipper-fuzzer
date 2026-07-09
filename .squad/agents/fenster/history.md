@@ -10,6 +10,10 @@
 
 <!-- Append new learnings below. Each entry is something lasting about the project. -->
 
+### 2026-07-09T18:05:00Z — Running scene: no two-column layout for wide identifiers
+
+BLE MACs ("AA:BB:CC:DD:EE:FF", ~17 chars, ~100px at FontSecondary) and Sub-GHz identifiers overflow a 64px half-column and collide with adjacent text. The running scene **must use full-width vertical rows** (x=0, full 128px) for all identifier lines — never a two-column split at x=64. Identifiers must also be copied into a bounded buffer (`char ident[22]`) via `snprintf` so strings longer than ~21 FontSecondary chars are silently truncated before being handed to `widget_add_string_element`.
+
 ### 2026-07-09 — App scaffold + engine wiring complete
 
 **App structure:**
