@@ -1,0 +1,17 @@
+{
+  "universe_usage_history": [
+    { "universe": "The Usual Suspects", "assigned_at": "2026-07-09", "assignment_id": "flipper-fuzzer-2026-07-09" }
+  ],
+  "assignment_cast_snapshots": {
+    "flipper-fuzzer-2026-07-09": {
+      "universe": "The Usual Suspects",
+      "created_at": "2026-07-09",
+      "cast": {
+        "keaton": "Lead / Firmware Architect",
+        "fenster": "Embedded Firmware Dev",
+        "mcmanus": "Wireless / RF Dev",
+        "hockney": "Tester / QA"
+      }
+    }
+  }
+}

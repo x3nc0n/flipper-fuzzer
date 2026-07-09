@@ -1,0 +1,117 @@
+# FluckFlock — Specification
+
+**Version:** 1.0
+**Date:** 2026-07-09
+**Target:** Flipper Zero (single platform)
+
+---
+
+## 1. Overview
+
+FluckFlock is a device-identifier "chaff" broadcaster. It continuously emits large volumes of plausible-looking wireless identifiers — BLE advertisement names/addresses, Sub-GHz RF beacons/noise, and optionally Wi-Fi SSIDs/BSSIDs (when the official Flipper Wi-Fi Dev Board is present) — that constantly rotate at random. The goal is to pollute passive/dragnet-style tracking systems with a high volume of fake, ever-changing identifiers, making it materially harder to distinguish and follow a real device or person among the noise.
+
+## 2. Goals
+
+1. Emit a high volume of plausible wireless identifiers across available radios.
+2. Rotate identifiers rapidly so no single fake identity persists long enough to be correlated.
+3. Keep the app useful with only the Flipper Zero's native radios (BLE + Sub-GHz). Wi-Fi chaff is an optional bonus when the dev board is detected.
+4. Provide simple runtime controls: start/stop all, per-radio toggles, live counters.
+5. Ship a clean, testable codebase — identifier generators are pure functions testable on-host without hardware.
+
+## 3. Non-Goals
+
+- Jamming or denial-of-service against legitimate networks.
+- Connecting to or interacting with real access points, BLE peripherals, or other devices.
+- Emulating specific real-world devices or identities (i.e., no targeted spoofing).
+- Multi-platform support. This is Flipper Zero only.
+- Persistent tracking / logging of nearby real devices.
+- Over-the-air firmware updates or remote control.
+
+## 4. Threat Model Targeted
+
+FluckFlock targets **passive / dragnet-style surveillance** that relies on:
+
+| Surveillance vector | How FluckFlock counters it |
+|---|---|
+| Wi-Fi probe-request MAC logging | Floods fake BSSIDs/SSIDs (requires dev board) |
+| BLE MAC / advertisement tracking | Emits rotating BLE advertisements with plausible names and locally-administered MACs |
+| RF fingerprinting on ISM bands | Emits Sub-GHz noise/beacons on common ISM frequencies via CC1101 |
+
+**Assumption:** The adversary passively collects identifiers in bulk. FluckFlock's value is proportional to the volume and plausibility of chaff emitted.
+
+**Out-of-model:** Active, targeted adversaries who fingerprint the Flipper Zero's own radio characteristics (e.g., TX power profile, timing jitter) are not addressed. This is a volume play, not a stealth play.
+
+## 5. Capabilities by Radio
+
+### 5.1 BLE Advertising (Native)
+
+- Emit BLE advertisement packets using the Flipper's built-in BLE stack.
+- Each advertisement cycle uses:
+  - A **locally-administered random MAC** (bit 1 of the first octet set; unicast).
+  - A **plausible BLE device name** drawn from realistic patterns (e.g., "Galaxy Buds Pro", "JBL Flip 6", "Tile Slim", "AirPods", short alphanumeric IDs).
+  - Valid advertisement structure (flags, complete/shortened local name, TX power level).
+- Rotate MAC + name every cycle (configurable interval, default ≤ 2 seconds).
+
+### 5.2 Sub-GHz via CC1101 (Native)
+
+- Emit OOK or 2-FSK beacons/noise on common ISM frequencies (e.g., 315 MHz, 433.92 MHz, 868 MHz, 915 MHz — region-dependent).
+- Payload: short pseudo-random bursts. No requirement for protocol-valid framing — goal is RF-level noise, not protocol spoofing.
+- Rotate frequency and payload each cycle.
+- Respect the Flipper's built-in region lock and duty-cycle limits.
+
+### 5.3 Wi-Fi via Dev Board (Optional)
+
+- **Gated on detection** of the official Flipper Wi-Fi Dev Board (ESP32) over UART.
+- If present:
+  - Command the ESP32 to broadcast beacon frames with:
+    - A **plausible SSID** (realistic patterns: "Starbucks WiFi", "HOME-A3F2", "ATT-WIFI-5G", "eduroam", short random names).
+    - A **plausible BSSID** using a real-world OUI prefix (from a built-in table of common AP vendor OUIs) plus random trailing octets.
+  - Rotate SSID + BSSID every cycle.
+- If absent: the Wi-Fi radio toggle is disabled/hidden in the UI. The app runs with BLE + Sub-GHz only.
+
+## 6. Identifier Plausibility Requirements
+
+All generated identifiers must look "real enough" to survive cursory automated inspection:
+
+| Identifier | Plausibility rules |
+|---|---|
+| **SSID** | 1–32 bytes. Drawn from a pool of realistic templates (common ISP default names, café/business names, home router patterns like `NETGEAR-XX`, `TP-Link_XXXX`). Mix of static-looking and randomized-suffix names. No null bytes or control characters. |
+| **BSSID** | 6 bytes. First 3 bytes from a curated OUI table of common AP vendors (TP-Link, Netgear, Cisco, Ubiquiti, etc., ≥ 20 OUIs). Last 3 bytes random. Unicast bit set, locally-administered bit clear (to look like a real vendor MAC). |
+| **BLE MAC** | 6 bytes. Locally-administered bit SET (bit 1 of first octet). Unicast (bit 0 of first octet clear). Remaining bits random. This is standard for BLE random addresses. |
+| **BLE Name** | 1–20 bytes. Drawn from a pool of realistic BLE device names (earbuds, fitness trackers, smart home devices, Tile/AirTag-style names, phone model names). |
+| **Sub-GHz payload** | Pseudo-random bytes. No plausibility requirement — goal is RF noise. |
+
+**No obvious garbage.** All string identifiers must be valid UTF-8, printable, and look like something a real device would emit.
+
+## 7. Rotation / Randomization Requirements
+
+- **High volume:** Emit as many distinct identifiers per minute as the radio hardware allows without violating duty-cycle / regulatory limits.
+- **Ever-changing:** No identifier (MAC, SSID, BSSID, BLE name) should repeat within a rolling window of at least 1000 emitted identifiers per radio.
+- **Low predictability:** Identifiers are generated via a PRNG seeded from hardware entropy (Flipper's `furi_hal_random`). The PRNG state is not persisted — a fresh seed on every app launch.
+- **Rotation interval:** Configurable per-radio, default 1–2 seconds per cycle. Each cycle emits one new set of identifiers per enabled radio.
+
+## 8. Runtime / UX Requirements
+
+- **Main menu:** List of radios with current enable/disable state.
+- **Start / Stop:** Global toggle to begin/cease all chaff emission.
+- **Per-radio toggles:** Enable or disable each radio independently (BLE, Sub-GHz, Wi-Fi). Wi-Fi toggle visible only when dev board detected.
+- **Live status / counters:** While running, display per-radio count of identifiers emitted since start. Update at least once per second.
+- **Minimal footprint:** The app should use ≤ reasonable RAM. No heap-heavy data structures.
+
+## 9. Constraints & Safety
+
+- **Legal / ethical:** This tool is intended for **security research and personal anti-tracking** use. Users are responsible for compliance with local laws regarding radio emissions. The app should display a brief disclaimer on first launch.
+- **Region limits:** Sub-GHz frequencies and duty cycles must respect the Flipper's built-in region configuration. Do not bypass region locks.
+- **Radio coexistence:** BLE advertising must coexist with the Flipper's own BLE stack (used for the companion app connection). If coexistence is not feasible, document the limitation.
+- **Power:** Continuous multi-radio TX will drain the battery. No specific runtime target, but avoid unnecessary CPU wake-ups when paused.
+- **No network interaction:** The app never connects to, authenticates with, or sends data to any external network or device (beyond broadcasting chaff).
+
+## 10. Out of Scope
+
+- Desktop/mobile companion app integration.
+- Logging or recording of emitted identifiers.
+- Receiving or scanning for real devices.
+- GPS/location tagging.
+- Firmware modification or custom Flipper firmware. This is a standard FAP.
+- Protocol-valid Wi-Fi association / deauth frames (we emit beacons only).
+- Any second hardware target.
