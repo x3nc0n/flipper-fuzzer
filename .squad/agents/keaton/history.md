@@ -100,3 +100,22 @@ See orchestration-log and session log for full deployment details.
 
 **Action items for Keaton:** Review platformio.ini and main.cpp changes before merge. Consider dedicated debug UART or USB CDC approach for v2.
 
+### 2026-07-18: McManus & Fenster — Wi-Fi OTG Power Fix (on-device startup bug)
+
+**Root cause:** FluckFlock FAP startup called `radio_wifi_detect()` with the Wi-Fi Dev Board unpowered. The ESP32-S2 is powered from the Flipper's 5V OTG rail, which is **disabled by default**. Without power, handshake always failed, `wifi_detected` remained false, and the Settings Wi-Fi toggle never appeared (toggle is gated on `app->wifi_detected` in `scene_settings.c`).
+
+**McManus fix (radio layer):** Added `radio_wifi_power_on()` / `radio_wifi_power_off()` to `radio_wifi.h / radio_wifi.c`. Uses `furi_hal_power_enable_otg()` / `disable_otg()` + idempotent state check. Settle time `WIFI_BOOT_SETTLE_MS = 1500` (cold-start ESP32-S2 to UART-ready ~800–1000ms + jitter margin). Hardened `radio_wifi_detect()` renamed internal single-shot to `wifi_do_detect_once()`, new `wifi_do_detect()` wrapper with 3 retry attempts, 150ms gaps, pre-flush `\n` to clear boot-time FIFO noise. Worst-case detect when board absent: ~1520ms. Typical when present: <400ms.
+
+**Fenster fix (app layer):** Call `radio_wifi_power_on()` in `fluckflock_app_alloc()` before `radio_wifi_detect()`. Call `radio_wifi_power_off()` in `fluckflock_app_free()` unconditionally after `chaff_engine_free()` (idempotent, covers all exit paths). Follows standard Flipper resource-lifecycle pattern (acquire in alloc, release in free).
+
+**Build verification:** `python -m ufbt` → SUCCESS, APPCHK PASSED, `dist/fluckflock.fap` (Target7, API 87.1).
+
+**Decisions documented:** Two entries in `.squad/decisions.md` (merged from inbox):
+- 2026-07-18: Wi-Fi Dev Board OTG Power Sequencing (McManus)
+- 2026-07-18: Wi-Fi Dev Board OTG Power Lifecycle in FluckFlock FAP (Fenster)
+
+**Status:** On-device only (not host-testable). **Pending:** User re-test on Flipper Zero + Wi-Fi Dev Board + Keaton code review.
+
+**Two review items now pending:** (a) esp32 platformio.ini/main.cpp build fixes; (b) flipperzero radio_wifi.*/fluckflock.c OTG power fix. Both added to review queue.
+
+

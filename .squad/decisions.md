@@ -751,6 +751,87 @@ A software-defined radio (RTL-SDR, HackRF) tuned to 433.92 MHz with ~500 kHz ban
 
 ---
 
+### 2026-07-18: Wi-Fi Dev Board OTG Power Sequencing
+
+**Author:** McManus  
+**Date:** 2026-07-18  
+**Status:** Accepted  
+**Files affected:** `flipperzero/fluckflock/radio/radio_wifi.h`, `flipperzero/fluckflock/radio/radio_wifi.c`
+
+#### Problem
+
+The FluckFlock FAP was calling `radio_wifi_detect()` at startup with the Wi-Fi Dev Board unpowered. The official Flipper Wi-Fi Dev Board (ESP32-S2) is powered from the Flipper's 5V OTG rail, which is **disabled by default**. Without power, the ESP32 never responds to the `FF?\n` handshake, so `wifi_detected` stayed false and the Wi-Fi toggle never appeared in Settings.
+
+#### Decision
+
+**1. OTG power must be app-lifetime managed by the radio layer**
+
+Two new public functions added to `radio_wifi.h`:
+```c
+void radio_wifi_power_on(void);   // enable 5V OTG + wait for ESP32 boot
+void radio_wifi_power_off(void);  // disable 5V OTG on teardown
+```
+
+The Flipper's 5V OTG rail is the only power source for the Wi-Fi Dev Board. Enabling it is the radio layer's responsibility (not the app scene or the UART detect logic) because the correct call order is: `power_on → detect → init → [emit loop] → deinit → power_off`. Keeping the rail enabled for the app's full lifetime avoids ESP32 reboot mid-session. Power functions are idempotent; calling them out of order is safe.
+
+**2. Boot settle time: `WIFI_BOOT_SETTLE_MS = 1500 ms`**
+
+The ESP32-S2 Arduino build performs ROM bootloader, Arduino `setup()` with two `Serial.begin()` calls (USB-CDC + UART), and several `Serial.print()` debug lines before entering the `loop()`. Measured cold-start to UART-ready time is ~800–1000 ms. We use **1500 ms** to absorb cold-start jitter, Arduino framework variation, and USB-CDC enumeration overhead. The delay is only applied when OTG transitions from OFF→ON. If `radio_wifi_power_on()` is called when OTG is already enabled, the delay is skipped — the board is already running.
+
+**3. Detect retry hardening**
+
+The original single-shot `FF?\n` → `FF!v1\n` handshake (400 ms timeout) was fragile because the first bytes arriving at the Flipper UART after ESP32 boot can be lost to FIFO setup latency, and the ESP32 UART FIFO may contain leftover bytes from boot-time `Serial.print()` output. Hardening applied:
+
+| Parameter | Value | Rationale |
+|---|---|---|
+| Pre-flush `\n` | sent once before first attempt | clears ESP32 rx FIFO of boot noise |
+| Post-flush pause | 20 ms | gives ESP32 time to parse/discard the NL |
+| `WIFI_DETECT_ATTEMPTS` | 3 | catches first-byte-loss on UART settle |
+| `WIFI_DETECT_RETRY_MS` | 150 ms | short gap, doesn't penalise present board |
+| Per-attempt timeout | 400 ms (unchanged) | matches original handshake spec |
+
+Worst-case time when board is **absent**: 3 × 400 ms + 2 × 150 ms + 20 ms ≈ **1520 ms**. Typical time when board is **present**: one attempt succeeds in ≪ 400 ms.
+
+#### Invariants
+
+- `radio_wifi_power_on()` MUST be called (and return) before `radio_wifi_detect()`.
+- `radio_wifi_power_off()` MUST be called on app teardown (after `radio_wifi_deinit()`).
+- OTG rail state is queried with `furi_hal_power_is_otg_enabled()` before every enable/disable to prevent double-toggle.
+- Wire protocol (FF? / FF! / FFON / FFOFF / FFB), baud (115200), and pins are unchanged.
+- ESP32 companion firmware is NOT modified by this change.
+
+---
+
+### 2026-07-18: Wi-Fi Dev Board OTG Power Lifecycle in FluckFlock FAP
+
+**Date:** 2026-07-18  
+**Author:** Fenster  
+**Status:** Implemented
+
+#### Context
+
+The Flipper Wi-Fi Dev Board (ESP32-S2) draws from the Flipper's 5V OTG pin, which is **off by default**. `fluckflock_app_alloc()` was calling `radio_wifi_detect()` while the board was unpowered, so the UART handshake always failed, `wifi_detected` stayed false, and the Wi-Fi toggle never appeared in Settings.
+
+McManus added `radio_wifi_power_on()` / `radio_wifi_power_off()` to the `radio_wifi` interface (see decision 2026-07-18: Wi-Fi Dev Board OTG Power Sequencing above).
+
+#### Decision
+
+**Power on:** Call `radio_wifi_power_on()` in `fluckflock_app_alloc()`, immediately before `radio_wifi_detect()`. The board stays powered for the **entire app session** — it must remain on during Start Chaff so injection works.
+
+**Power off:** Call `radio_wifi_power_off()` in `fluckflock_app_free()`, unconditionally, after `chaff_engine_free()`. Both functions are idempotent; no conditional guard is needed. `app_free` is the single FAP teardown point, so one call there covers every exit path.
+
+#### Rationale
+
+- Powering off in `app_free` (not after detect) avoids adding a second ownership site and keeps the 5V rail live for the chaff session.
+- Unconditional call in `app_free` is safe because `radio_wifi_power_off()` is idempotent — if the board was never detected, turning off a rail that was never turned on is a no-op.
+- Mirrors standard Flipper resource-lifecycle convention: acquire in alloc, release in free.
+
+#### Files Changed
+
+- `flipperzero/fluckflock/fluckflock.c` — `fluckflock_app_alloc()` and `fluckflock_app_free()`
+
+---
+
 ## Governance
 
 - All meaningful changes require team consensus
