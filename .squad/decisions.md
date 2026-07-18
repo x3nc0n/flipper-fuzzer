@@ -590,6 +590,167 @@ Hypothesis *"the current UART0 build works over the Flipper expansion-header lin
 
 ---
 
+### 2026-07-18: RF Validation Playbook — FluckFlock Live Chaff
+
+**Owner:** McManus (Wireless / RF Dev)  
+**Date:** 2026-07-18  
+**Status:** Reusable reference — run whenever you need external confirmation that FluckFlock is actually radiating.
+
+#### What the identifiers look like
+
+##### Wi-Fi SSIDs (10 templates, channel 6)
+
+| Template | Example |
+|---|---|
+| ISP prefix + 4 HEX | `NETGEAR4F2A`, `TP-Link_9B3D`, `Xfinity3AC1` |
+| ISP prefix + 2 decimal | `ATT47`, `Spectrum09` |
+| Name's Device | `Sarah's iPhone 14`, `James's Galaxy S23` |
+| Static well-known | `xfinitywifi`, `eduroam`, `Boingo Hotspot`, `linksys` |
+| HP printer | `HP-Print-3F-LaserJet`, `HP-Print-A0-DeskJet` |
+| Wi-Fi Direct (lowercase hex) | `DIRECT-a1-Pixel 7`, `DIRECT-3f-iPad` |
+| Android hotspot | `AndroidAP_5821` |
+| Redmi | `Redmi Note 9 Pro`, `Redmi Note 3` |
+| Setup | `Setup3B9C`, `Setup1F4A` |
+| ASUS | `ASUS_9F1C`, `ASUS_4D2B` |
+
+All beacons land on **2.4 GHz channel 6**.
+
+##### BSSIDs
+
+Real vendor OUI prefixes (first 3 bytes), random host (last 3 bytes).  
+All are globally-administered unicast (bit0=bit1=0 on byte 0).
+
+Key OUI ranges:
+
+| Vendor | OUI examples |
+|---|---|
+| Apple | `00:03:93`, `3C:07:54`, `F0:DB:E2` |
+| Samsung | `24:4B:03`, `A4:07:B6`, `CC:07:AB` |
+| Cisco | `00:00:0C`, `00:18:18` |
+| TP-Link | `50:C7:BF`, `84:D8:1B`, `EC:26:CA` |
+| Netgear | `00:09:5B`, `28:C6:8E`, `D8:EB:97` |
+| Espressif | `24:6F:28`, `30:AE:A4`, `EC:64:C9` |
+| Google/Nest | `00:1A:11`, `54:60:09`, `F4:F5:D8` |
+| Amazon/Eero | `28:EF:01`, `CC:F7:35` |
+| Ubiquiti | `04:18:D6`, `70:A7:41`, `88:DC:96` |
+| Aruba | `00:0B:86`, `94:B4:0F` |
+
+##### BLE advertisement names
+
+Pools (with rough frequency):
+- **Earbuds (~25%):** `AirPods`, `AirPods Pro`, `Galaxy Buds2`, `Jabra Elite 7 Pro`, `Sony WF-1000XM5`, `Beats Fit Pro`, …
+- **Wearables (~17%):** `Fitbit Charge 6`, `Galaxy Watch 6`, `Apple Watch`, `Garmin Venu 3`, …
+- **Speakers (~17%):** `JBL Flip 6`, `Bose SoundLink Flex`, `Sony SRS-XB33`, `UE BOOM 3`, …
+- **Trackers (~17%):** `Tile`, `Tile Pro`, `AirTag`, `SmartTag2`, `Chipolo ONE`, …
+- **Phones (~8%):** `iPhone`, `Pixel 8`, `Samsung Galaxy`, …
+- **Possessive (~17%):** `Sarah's AirPods`, `James's Apple Watch`, `Emma's Fitbit`, …
+- **~30% have a suffix:** `AirPods Pro (42)`, `JBL Flip 6 [37]`, `Tile-83`
+
+##### BLE MACs
+
+Random static — `out[0] = (byte | 0xC2) & 0xFE` — so byte 0 always has bits 7, 6, 1 set; bit 0 clear.  
+In hex: byte 0 looks like `C2`, `C6`, `CA`, `CE`, `D2`, … (0b11xxxxxx, even).
+
+##### Sub-GHz
+
+**433.92 MHz**, OOK 270 kHz, random byte payload (up to 60 bytes).  
+No structured framing — appears as noise bursts on 433.92 MHz.
+
+#### Baseline Wi-Fi snapshot (captured 2026-07-18 ~16:54 local)
+
+7 SSIDs visible before chaff started:
+
+| SSID | Channels seen |
+|---|---|
+| The WLAN Before Time | 1, 5 GHz (149, 100) |
+| GuestNET | 1, 5 GHz (149, 100) |
+| legit_IoS | 1, 5 GHz (149, 100) |
+| TrustedGuest | 1, 5 GHz (149, 100) |
+| *(hidden/empty)* | 5 GHz (36, 149), 1 |
+| ATTUSKSp5S | 5 (2.4 GHz) |
+| williamswifi | **6** (2.4 GHz) |
+
+Note: `williamswifi` is already on ch6 — it's a real neighbour, not chaff.  
+Any **new** SSID appearing on ch6 after chaff starts is a FluckFlock candidate.
+
+#### Validation Playbook
+
+##### Step 0 — before hitting "Start Chaff"
+
+Baseline is already captured above. If you need a fresh one:
+```powershell
+netsh wlan show networks mode=bssid
+```
+
+##### Step 1 — Wi-Fi validation (most important — new hardware path)
+
+**Quick check (Windows, no extra gear):**
+
+```powershell
+$b = @("The WLAN Before Time","GuestNET","legit_IoS","TrustedGuest","","ATTUSKSp5S","williamswifi")
+(netsh wlan show networks mode=bssid) -match "^SSID \d+ :" |
+  ForEach-Object { $s = ($_ -split " : ",2)[1].Trim(); if($b -notcontains $s){ "NEW: $s" } }
+```
+
+Run this **after chaff has been running for at least 10 seconds**.  
+
+You should see output like:
+```
+NEW: NETGEAR4F2A
+NEW: Sarah's iPhone 14
+NEW: AndroidAP_5821
+```
+
+**What to look for:** New SSIDs matching any FluckFlock template, BSSIDs whose first 3 bytes match the vendor OUI list above, all on channel 6.
+
+**Caveats:**
+- Windows caches scans ~30–60 s. If no new SSIDs appear, disable/re-enable Wi-Fi to force a fresh scan, then re-run.
+- FluckFlock sends ONE beacon per `FFB` command and immediately rotates to the next SSID. Each individual beacon may not linger long enough for Windows to pick up — this is expected behaviour. The chaff is working even if you only catch 1–2 new SSIDs.
+- A phone Wi-Fi scanner (e.g. **WiFi Analyzer** on Android, **Network Analyzer** on iOS) or a wardriving app refreshes faster than Windows and will catch more.
+
+**Gold standard (if you have a monitor-mode adapter):**
+
+```bash
+# Linux with a mon-capable adapter (mon0)
+sudo tshark -i mon0 -f "type mgt subtype beacon" \
+  -Y "wlan.ds.current_channel==6" \
+  -T fields -e wlan.ssid -e wlan.ta
+```
+
+Or in Wireshark: filter `wlan.fc.type_subtype == 0x08 && wlan_mgt.fixed.ds_channel == 6`.
+
+You'll see a stream of rotating SSIDs from the FluckFlock OUIs above.
+
+##### Step 2 — BLE validation
+
+**Phone app (recommended — no extra gear):**
+1. Open **nRF Connect** (Android/iOS) or **LightBlue** (iOS).
+2. Go to the Scanner tab; set "Show unnamed devices" on.
+3. While chaff runs, you should see a rapidly cycling list of devices with names matching the BLE name pools above — earbuds, wearables, speakers, trackers — and with MACs where byte 0 is 0bC2/C6/CA/CE/D2/D6/DA/DE/E2… (high two bits = 1, bit 0 = 0).
+
+**Windows note:** PowerShell BLE scanning (`Get-PnpDevice` / WinRT BLE APIs) is throttled and unreliable for passive scanning. Use a phone app.
+
+##### Step 3 — Sub-GHz validation (optional / best-effort)
+
+Hardest to validate without a second receiver.
+
+- **Frequency:** 433.92 MHz  
+- **Modulation:** OOK 270 kHz  
+
+To confirm emission, put a **second Flipper Zero** in `Sub-GHz → Read RAW` mode on 433.92 MHz (AM650 preset is close enough to catch OOK). You should see activity bursts synchronised with the Sub-GHz counter on the chaff Flipper's display.
+
+A software-defined radio (RTL-SDR, HackRF) tuned to 433.92 MHz with ~500 kHz bandwidth in a waterfall view will also show burst activity.
+
+#### Quick-reference cheat sheet
+
+| Radio | Frequency/Channel | Look for | Tool |
+|---|---|---|---|
+| Wi-Fi | ch 6 (2.437 GHz) | New SSIDs from templates + known vendor OUIs | netsh diff one-liner, phone Wi-Fi scanner |
+| BLE | 2.4 GHz (37/38/39) | Rotating advert names from pools, MAC byte0 ≥ 0xC2 even | nRF Connect / LightBlue |
+| Sub-GHz | 433.92 MHz | OOK burst activity | 2nd Flipper RAW read or RTL-SDR waterfall |
+
+---
+
 ## Governance
 
 - All meaningful changes require team consensus
