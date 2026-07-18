@@ -119,3 +119,63 @@ See orchestration-log and session log for full deployment details.
 **Two review items now pending:** (a) esp32 platformio.ini/main.cpp build fixes; (b) flipperzero radio_wifi.*/fluckflock.c OTG power fix. Both added to review queue.
 
 
+### 2026-07-18: Wi-Fi Beacon Persistence — Recommend Approach B (ESP Autonomous Beaconing)
+
+**Problem:** Single-shot beacon per chaff step is invisible to Wi-Fi scanners; scanners need repeated beacons on a stable SSID/BSSID.
+
+**Decision:** Approach B — ESP32 companion autonomously re-transmits the last-received beacon frame at ~100ms intervals until the next FFB replaces it or FFOFF stops injection. No Flipper-side engine or UI changes needed. UART protocol semantics shift from "inject once" to "set active beacon" (transparent to Flipper).
+
+**Spec reconciliation:** Bounded dwell (same SSID for 1–2s, then rotate) does not violate §7's 1000-window non-repeat rule (which counts distinct identifiers, not frames). Invisible chaff fails the spec's stated goal (§1, §4: pollute scan results). Dwell is required, not optional.
+
+**Pending:** User approval. Then McManus implements ESP re-beacon loop, Keaton updates spec.md §5.3 + task-flipper.md, reviews McManus's changes.
+
+**Decision file:** `.squad/decisions/inbox/keaton-wifi-beacon-persistence.md`
+
+
+### 2026-07-18: Reviewer Gate — APPROVE (3 batches: ESP32 build fix + OTG power + Option B beaconing)
+
+**Verdict: ✅ APPROVE** — all three batches correct, safe, ready to commit. Hardware-verified by user.
+
+**Reviewed files:**
+- `esp32/fluckflock_companion/platformio.ini` — removed `ARDUINO_USB_CDC_ON_BOOT=1`
+- `esp32/fluckflock_companion/src/main.cpp` — `Serial0`→`Serial`, autonomous beacon repeat loop (100 ms, `current_frame[128]`)
+- `flipperzero/fluckflock/fluckflock.c` — `radio_wifi_power_on()` in alloc, `power_off()` in free
+- `flipperzero/fluckflock/radio/radio_wifi.c` — OTG power functions, detect retry (3×400 ms + pre-flush)
+- `flipperzero/fluckflock/radio/radio_wifi.h` — new `radio_wifi_power_on/off()` declarations
+
+**Key findings — no blockers:**
+- OTG lifecycle symmetric, idempotent, correct ordering (power_on → detect → engine → deinit → power_off).
+- Buffer safety: max beacon 83 bytes, buffer 128 — safe. `frame_len` bounds-checked by `build_beacon()`.
+- FFOFF and FFON both clear `current_frame_len` — no stale beacon leaks across sessions.
+- Spec §7 non-repeat rule honored: Option B repeats frames, not identities.
+
+**Nits (non-blocking, assigned to Fenster):**
+1. `.pio/` build dir needs adding to `.gitignore`.
+2. Stale "USB CDC debug output" comment + redundant first `Serial.begin()` in `setup()`.
+3. Debug prints share Flipper UART (acceptable, noted for v2).
+
+**Decision file:** `.squad/decisions/inbox/keaton-option-b-review.md`
+
+
+### 2026-07-18: PR #1 Triage — REJECT (destructive spec rewrite, scope violation)
+
+PR #1 by @AzureAzim ("Add files via upload", branch `merging-azim-specs`) adds task files for ESP32, ESP8266, and Raspberry Pi, but **rewrites spec.md destructively**: deletes all Flipper-Zero-specific content (Sub-GHz/CC1101, UART Wi-Fi protocol, BLE stack details, UX requirements, threat model), removes "Flipper Zero only" from non-goals/out-of-scope, replaces repo structure (drops `flipperzero/` and `test/` dirs), reduces no-repeat window from 1000→500, adds unsanctioned SSID protest_words[] theme. Directly contradicts the active "Single hardware target — Flipper Zero only" decision in `decisions.md`. Flipper Zero doesn't appear in the new hardware capability matrix at all.
+
+New task files are technically sound but represent a different project. Verdict: REJECT. Spec.md must not be touched without overriding the Flipper-only decision first. Companion-platform docs could land separately without destroying the existing spec contract.
+
+**Decision file:** `.squad/decisions/inbox/keaton-pr1-triage.md`
+
+
+### 2026-07-18: PR #1 Reconciliation Merge — Owner Override
+
+Owner @x3nc0n overrode REJECT verdict on PR #1 and directed a reconciled merge. Executed:
+
+1. **Merged PR #1** via `git merge --no-commit --no-ff` + reconciled spec.md + commit + push. GitHub auto-detected the merge — PR #1 shows state=MERGED.
+2. **3 task files landed as-is:** `task-esp32.md`, `task-esp8266.md`, `task-raspberrypi.md` — pure additions, technically sound, authored by @AzureAzim.
+3. **spec.md reconciled (v1.0 → v1.1):** Full Flipper-Zero contract (§1–§10) retained verbatim. Added §11 (Companion Platforms) framing ESP32/ESP8266/RPi as companion radios pairing with the Flipper host, plus §12 (updated repo structure). Azim's destructive rewrite, protest_words[] theme, and no-repeat window reduction (1000→500) were NOT adopted.
+4. **Firmware integrity verified:** Commit `8183862` (OTG power + Option B beaconing + ESP32 build fix) confirmed in master ancestry. No source files touched.
+5. **Authorship:** Co-authored-by trailers for @AzureAzim and @Copilot on merge commit. PR comment posted crediting Azim's contribution.
+
+**Lesson:** When the owner overrides a REJECT, execute the merge but protect the spec contract. Reconciliation > capitulation. The spec is the contract; fold in intent without losing precision.
+
+**Decision file:** `.squad/decisions/inbox/keaton-pr1-merge.md`
