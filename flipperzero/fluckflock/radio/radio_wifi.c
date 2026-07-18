@@ -18,8 +18,14 @@
  *   deinit → sends "FFOFF\n", releases handle.
  *   emit   → sends "FFB <bssid12hex> <ssid>\n" (fire-and-forget).
  *
+ * Power sequencing (2026-07-18):
+ *   The Flipper Wi-Fi Dev Board is powered from the Flipper 5V OTG rail, which
+ *   is OFF by default.  radio_wifi_power_on() enables it and waits for the
+ *   ESP32-S2 to boot.  radio_wifi_power_off() disables it on teardown.
+ *   See .squad/decisions/inbox/mcmanus-wifi-otg-power.md.
+ *
  * SDK symbols verified against Flipper SDK 1.4.3 furi_hal_serial.h /
- * furi_hal_serial_control.h.
+ * furi_hal_serial_control.h / furi_hal_power.h.
  */
 
 #include "radio_wifi.h"
@@ -29,6 +35,7 @@
 #include <furi.h>
 #include <furi_hal_serial.h>
 #include <furi_hal_serial_control.h>
+#include <furi_hal_power.h>
 
 #include <string.h>
 
@@ -36,8 +43,27 @@
 
 #define WIFI_UART_BAUD          115200u
 
-/* Timeout for the "FF?" → "FF!v1" handshake exchange */
+/*
+ * Time to wait after enabling OTG power before the ESP32-S2 is UART-ready.
+ *
+ * The ESP32-S2 Arduino build runs two Serial.begin() calls plus several Serial
+ * prints in setup().  ROM boot + Arduino init + USB-CDC + UART ready takes
+ * roughly 800–1000 ms on real hardware.  We use 1500 ms to absorb cold-start
+ * jitter and any variation across firmware builds without being excessively slow.
+ */
+#define WIFI_BOOT_SETTLE_MS     1500u
+
+/* Timeout per attempt for the "FF?" → "FF!v1" handshake exchange */
 #define WIFI_DETECT_TIMEOUT_MS  400u
+
+/*
+ * Number of times to retry the handshake before declaring the board absent.
+ * The first attempt can lose bytes while the ESP32 UART FIFO settles post-boot.
+ */
+#define WIFI_DETECT_ATTEMPTS    3u
+
+/* Gap between successive detect retries */
+#define WIFI_DETECT_RETRY_MS    150u
 
 /* Largest TX buffer needed: "FFB " + 12 hex + " " + 32-char SSID + "\n\0" = 51 */
 #define WIFI_CMD_BUF_SIZE       64u
@@ -97,11 +123,11 @@ static void wifi_tx_str(FuriHalSerialHandle* h, const char* s, size_t len) {
 }
 
 /*
- * Perform a detect handshake on an already-opened handle.
+ * Perform one detect handshake attempt on an already-opened handle.
  * Sends FF?\n, waits up to WIFI_DETECT_TIMEOUT_MS for an "FF!" reply prefix.
  * Returns true on success.
  */
-static bool wifi_do_detect(FuriHalSerialHandle* h) {
+static bool wifi_do_detect_once(FuriHalSerialHandle* h) {
     char   cmd[8];
     size_t cmd_len = wifi_proto_build_handshake(cmd, sizeof(cmd));
     if(cmd_len == 0u) return false;
@@ -129,7 +155,46 @@ static bool wifi_do_detect(FuriHalSerialHandle* h) {
             rx.buf[2] == '!');
 }
 
-/* ---- Public API ---- */
+/*
+ * Perform a detect handshake on an already-opened handle with retry logic.
+ *
+ * On the first attempt, send a lone '\n' flush before the real handshake to
+ * clear any garbage in the ESP32 UART rx FIFO left over from boot prints.
+ * Then try up to WIFI_DETECT_ATTEMPTS times with WIFI_DETECT_RETRY_MS gaps.
+ */
+static bool wifi_do_detect(FuriHalSerialHandle* h) {
+    /* Pre-flush: clear the ESP32 rx line buffer of any boot-time noise */
+    static const char flush_nl[] = "\n";
+    wifi_tx_str(h, flush_nl, 1u);
+    furi_delay_ms(20u); /* brief pause so the ESP32 echoes/discards the NL */
+
+    for(uint8_t attempt = 0u; attempt < WIFI_DETECT_ATTEMPTS; attempt++) {
+        if(wifi_do_detect_once(h)) return true;
+        if(attempt + 1u < WIFI_DETECT_ATTEMPTS) {
+            furi_delay_ms(WIFI_DETECT_RETRY_MS);
+        }
+    }
+    return false;
+}
+
+/* ---- Public API — power management ---- */
+
+void radio_wifi_power_on(void) {
+    if(furi_hal_power_is_otg_enabled()) {
+        /* OTG already on — board is already booted, skip delay */
+        return;
+    }
+    furi_hal_power_enable_otg();
+    /* Block until the ESP32-S2 has booted and its UART is ready */
+    furi_delay_ms(WIFI_BOOT_SETTLE_MS);
+}
+
+void radio_wifi_power_off(void) {
+    if(!furi_hal_power_is_otg_enabled()) return;
+    furi_hal_power_disable_otg();
+}
+
+/* ---- Public API — detect / init / deinit / emit ---- */
 
 bool radio_wifi_detect(void) {
     if(wifi_serial) {

@@ -7,6 +7,9 @@
 # Squad: SubSquad activation file (local to this machine)
 .squad-workstream
 
+# ESP32 / PlatformIO build artifacts
+esp32/**/.pio/
+
 # Flipper FAP build artifacts
 flipperzero/**/dist/
 flipperzero/**/.vscode/

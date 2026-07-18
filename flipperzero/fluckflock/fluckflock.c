@@ -1,5 +1,5 @@
 #include "fluckflock.h"
-#include "radio/radio_wifi.h"   // radio_wifi_detect() — called once at startup
+#include "radio/radio_wifi.h"   // radio_wifi_power_on/off, radio_wifi_detect() — called at startup/teardown
 
 #include <furi.h>
 #include <furi_hal.h>
@@ -116,7 +116,10 @@ static FluckFlockApp* fluckflock_app_alloc(void) {
     // Chaff engine
     app->chaff_engine = chaff_engine_alloc();
 
-    // One-time WiFi detection (may block ~500 ms)
+    // Power the Wi-Fi Dev Board (5V OTG), wait for ESP boot, then detect.
+    // Blocks ~1.5–2 s total. Board stays powered for the entire app session
+    // so injection works during Start Chaff. Powered off in fluckflock_app_free().
+    radio_wifi_power_on();
     app->wifi_detected = radio_wifi_detect();
 
     // Status refresh timer is owned by scene_running; initialised to NULL here.
@@ -153,6 +156,9 @@ static void fluckflock_app_free(FluckFlockApp* app) {
     }
 
     chaff_engine_free(app->chaff_engine);
+
+    // Power off the Wi-Fi Dev Board (5V OTG). Idempotent — safe even if never detected.
+    radio_wifi_power_off();
 
     // Remove views before freeing modules
     view_dispatcher_remove_view(app->view_dispatcher, FluckFlockViewSubmenu);

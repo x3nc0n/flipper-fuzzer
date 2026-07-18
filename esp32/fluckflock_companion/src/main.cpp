@@ -17,7 +17,7 @@
  *   Flipper GPIO 13 (TX) → ESP32-S2 GPIO 44 (UART0 RX)
  *   Flipper GPIO 14 (RX) ← ESP32-S2 GPIO 43 (UART0 TX)
  *
- * Debug output on USB CDC (Serial0 on ESP32-S2 Arduino).
+ * All serial output (debug + Flipper link) runs on UART0 (Serial on ESP32-S2 Arduino).
  *
  * ⚠ LEGAL NOTICE: 802.11 frame injection is regulated.  Use only in
  *   controlled research environments or for anti-tracking purposes where
@@ -44,6 +44,9 @@
 /* Maximum line length: "FFB " + 12 hex + " " + 32-char SSID + "\n" + '\0' = 51 */
 #define LINE_BUF_LEN 64
 
+/* Re-transmit the current beacon at this interval (matches 100 TU real-AP cadence) */
+#define BEACON_REPEAT_MS 100
+
 /* ── Globals ── */
 
 static bool injection_enabled = false;
@@ -52,6 +55,11 @@ static uint8_t current_channel = FLUCKFLOCK_CHANNEL;
 /* Line accumulator for the Flipper serial link */
 static char line_buf[LINE_BUF_LEN];
 static size_t line_pos = 0;
+
+/* Autonomous beacon repeat store — holds the most-recently-set beacon frame */
+static uint8_t  current_frame[128];
+static size_t   current_frame_len = 0;
+static uint32_t last_beacon_ms    = 0;
 
 /* ── 802.11 Beacon Frame Template ──
  *
@@ -187,10 +195,11 @@ static void wifi_injection_start(void) {
      */
     esp_wifi_set_promiscuous(true);
 
+    current_frame_len = 0;  /* start clean — no stale beacon from a previous session */
     injection_enabled = true;
 
-    Serial0.print("[FF] injection ON ch=");
-    Serial0.println(current_channel);
+    Serial.print("[FF] injection ON ch=");
+    Serial.println(current_channel);
 }
 
 static void wifi_injection_stop(void) {
@@ -199,7 +208,8 @@ static void wifi_injection_stop(void) {
     esp_wifi_stop();
     esp_wifi_deinit();
     injection_enabled = false;
-    Serial0.println("[FF] injection OFF");
+    current_frame_len = 0;  /* stop autonomous repeat */
+    Serial.println("[FF] injection OFF");
 }
 
 /* ── Command handler ── */
@@ -207,38 +217,43 @@ static void wifi_injection_stop(void) {
 /* Inject one beacon for the given SSID + BSSID */
 static void cmd_beacon(const char* bssid_hex12, const char* ssid, size_t ssid_len) {
     if(!injection_enabled) {
-        Serial0.println("[FF] ERR beacon while injection off");
+        Serial.println("[FF] ERR beacon while injection off");
         return;
     }
     uint8_t bssid[6];
     if(!parse_bssid(bssid_hex12, bssid)) {
-        Serial0.println("[FF] ERR bad bssid");
+        Serial.println("[FF] ERR bad bssid");
         return;
     }
     if(ssid_len == 0 || ssid_len > 32) {
-        Serial0.println("[FF] ERR bad ssid len");
+        Serial.println("[FF] ERR bad ssid len");
         return;
     }
 
     uint8_t frame[128];
     size_t  frame_len = build_beacon(frame, sizeof(frame), bssid, ssid, ssid_len, current_channel);
     if(frame_len == 0) {
-        Serial0.println("[FF] ERR frame build failed");
+        Serial.println("[FF] ERR frame build failed");
         return;
     }
 
     esp_wifi_80211_tx(WIFI_IF_STA, frame, (int)frame_len, false);
 
-    Serial0.print("[FF] beacon ");
-    Serial0.print(bssid_hex12);
-    Serial0.print(" ");
-    Serial0.println(ssid);
+    /* Store frame for autonomous repeat — copy AFTER successful build/inject */
+    memcpy(current_frame, frame, frame_len);
+    current_frame_len = frame_len;
+    last_beacon_ms    = millis();
+
+    Serial.print("[FF] beacon ");
+    Serial.print(bssid_hex12);
+    Serial.print(" ");
+    Serial.println(ssid);
 }
 
 /* Process a single complete line (with trailing '\n' stripped) */
 static void process_line(char* line) {
-    Serial0.print("[FF] rx: ");
-    Serial0.println(line);
+    Serial.print("[FF] rx: ");
+    Serial.println(line);
 
     if(strcmp(line, "FF?") == 0) {
         Serial.println("FF!v1");
@@ -256,7 +271,7 @@ static void process_line(char* line) {
         const char* rest = line + 4;
         /* Expect exactly 12 hex chars then a space */
         if(strlen(rest) < 14 || rest[12] != ' ') {
-            Serial0.println("[FF] ERR malformed FFB");
+            Serial.println("[FF] ERR malformed FFB");
             return;
         }
         char bssid_hex[13];
@@ -268,21 +283,18 @@ static void process_line(char* line) {
 
         cmd_beacon(bssid_hex, ssid, ssid_len);
     } else {
-        Serial0.print("[FF] unknown cmd: ");
-        Serial0.println(line);
+        Serial.print("[FF] unknown cmd: ");
+        Serial.println(line);
     }
 }
 
 /* ── Arduino entry points ── */
 
 void setup(void) {
-    /* USB CDC debug output */
-    Serial0.begin(115200);
-    Serial0.println("[FF] FluckFlock companion v1 booting");
-
-    /* UART to Flipper on hardware UART0 pins 43/44 */
+    /* Flipper link: bind Serial to UART0 (GPIO 44 RX / GPIO 43 TX) at 115200 */
     Serial.begin(FLIPPER_UART_BAUD, SERIAL_8N1, FLIPPER_UART_RX_PIN, FLIPPER_UART_TX_PIN);
-    Serial0.println("[FF] Flipper UART ready");
+    Serial.println("[FF] FluckFlock companion v1 booting");
+    Serial.println("[FF] Flipper UART ready");
 }
 
 void loop(void) {
@@ -302,5 +314,12 @@ void loop(void) {
             line_buf[line_pos++] = c;
         }
         /* Silently drop bytes if the line buffer overflows */
+    }
+
+    /* Autonomous beacon repeat — re-transmit current beacon at 100 ms intervals */
+    if(injection_enabled && current_frame_len > 0 &&
+       (millis() - last_beacon_ms) >= BEACON_REPEAT_MS) {
+        esp_wifi_80211_tx(WIFI_IF_STA, current_frame, (int)current_frame_len, false);
+        last_beacon_ms = millis();
     }
 }

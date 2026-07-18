@@ -12,6 +12,11 @@
  * ssid_len parameter dropped — callers use strlen() or know their buffer length.
  * radio_wifi_init() returns bool (unlike ble/subghz void inits) because the
  * UART open can fail independently of detect().  See mcmanus-radio-interface.md.
+ *
+ * DECISION (2026-07-18, McManus): Added radio_wifi_power_on() / _power_off() to
+ * manage the Flipper 5V OTG rail that powers the Wi-Fi Dev Board.  The board is
+ * off by default; callers MUST power it on and let it boot before calling detect().
+ * See .squad/decisions/inbox/mcmanus-wifi-otg-power.md.
  */
 
 #pragma once
@@ -20,15 +25,35 @@
 #include <stdbool.h>
 
 /*
+ * Enable the Flipper 5V OTG power rail to the Wi-Fi Dev Board and block until
+ * the ESP32-S2 has finished booting.
+ *
+ * Idempotent: safe to call when OTG is already on (will NOT re-assert or re-wait).
+ * Must be called BEFORE radio_wifi_detect().
+ * Must be matched by radio_wifi_power_off() on app teardown.
+ */
+void radio_wifi_power_on(void);
+
+/*
+ * Disable the Flipper 5V OTG power rail to the Wi-Fi Dev Board.
+ *
+ * Idempotent: safe to call when OTG is already off.
+ * Call during app teardown after radio_wifi_deinit().
+ */
+void radio_wifi_power_off(void);
+
+/*
  * Probe UART for the official Flipper Wi-Fi Dev Board (ESP32).
  *
- * Sends a detection ping and waits up to ~500 ms for a valid response.
+ * Sends a detection ping with up to WIFI_DETECT_ATTEMPTS retries; each attempt
+ * waits up to WIFI_DETECT_TIMEOUT_MS ms.  A leading '\n' flush is sent on the
+ * first attempt to clear the ESP32 UART rx buffer post-boot.
  *
  * @return true  Dev board present and responsive.
- * @return false No board, no response, or UART busy.
+ * @return false No board, no response after all attempts, or UART busy.
  *
- * NOTE: Currently stubbed to return false — see TODO in radio_wifi.c.
- * Blocks the calling thread up to ~500 ms. Call once at app startup.
+ * Call radio_wifi_power_on() first; detect() assumes the board is already
+ * powered and booted.  Blocks the calling thread (up to ~1500 ms worst case).
  */
 bool radio_wifi_detect(void);
 
