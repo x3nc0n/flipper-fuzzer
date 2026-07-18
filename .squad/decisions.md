@@ -480,6 +480,53 @@ furi_ms_to_ticks(uint32_t ms)                             → uint32_t
 
 ---
 
+### 2026-07-18: ESP32 companion firmware — PlatformIO invocation on Windows
+
+**Date:** 2026-07-18  
+**Author:** Fenster  
+**Status:** Active
+
+#### Context
+
+First-time build and flash of `esp32\fluckflock_companion\` on a Windows machine.
+
+#### Decisions Made
+
+##### 1. PlatformIO invoked as `python -m platformio`, never as `pio`
+
+The `pio` shim is not on PATH after `pip install --user platformio` on the Windows Store Python (3.13). All build and flash commands must use `python -m platformio run [...]`. This is the canonical invocation for this machine.
+
+##### 2. Remove `-DARDUINO_USB_CDC_ON_BOOT=1` from `platformio.ini` build_flags
+
+The flag causes a build failure in espressif32 framework 3.20017.241212 on ESP32-S2:
+`HardwareSerial.cpp:51: error: 'Serial' was not declared in this scope`
+This is a framework bug (HWCDC replaces Serial but HardwareSerial.cpp doesn't see the extern).
+
+**Removed flag from `platformio.ini`.** Consequence: debug output goes to UART0 (same as Flipper link) rather than USB CDC. Acceptable for v1 — revisit when a dedicated debug UART or USB CDC approach is chosen.
+
+##### 3. Replace `Serial0` with `Serial` in `main.cpp`
+
+`Serial0` is undefined without `ARDUINO_USB_CDC_ON_BOOT=1` in espressif32 3.x. All `Serial0` calls replaced with `Serial`. Both debug prints and Flipper-link UART now use `Serial` (UART0, GPIO43/44). Minor protocol noise risk if Flipper firmware doesn't tolerate unexpected lines; accepted for now.
+
+##### 4. ESP32-S2 native USB requires manual bootloader entry for flashing
+
+The official Flipper Wi-Fi Dev Board (ESP32-S2-WROVER-I) does not support esptool's DTR/RTS auto-reset over native USB CDC. Auto-upload fails with "No serial data received" on both COM6 and COM7.
+
+**Required flash procedure:**
+1. Hold BOOT button
+2. Tap RESET (while holding BOOT)
+3. Release BOOT
+4. Immediately run: `python -m platformio run -t upload --upload-port COM6` (or COM7)
+
+This must be documented in the project README and any flash scripts.
+
+##### Files Modified
+
+- `esp32\fluckflock_companion\platformio.ini` — removed `-DARDUINO_USB_CDC_ON_BOOT=1`
+- `esp32\fluckflock_companion\src\main.cpp` — replaced all `Serial0` with `Serial`
+
+---
+
 ## Governance
 
 - All meaningful changes require team consensus

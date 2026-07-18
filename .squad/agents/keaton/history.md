@@ -82,3 +82,21 @@ See orchestration-log and session log for full deployment details.
 - New "Wi-Fi Dev Board" subsection added covering two-part setup (flash PlatformIO companion, then mount board).
 - Host Tests CI badge (`host-tests.yml`) added beneath existing badges.
 
+### 2026-07-18: Fenster ESP32-S2 companion build & flash — Review PENDING
+
+**Fenster (2 sync runs):** Built and flashed `esp32/fluckflock_companion` to Official Flipper Wi-Fi Dev Board (ESP32-S2-WROVER-I).
+
+**Outcome:** ✅ Build SUCCEEDED after 2 espressif32 framework compatibility fixes; ✅ Flash SUCCEEDED on COM8 after manual bootloader entry.
+
+**Changes (UNCOMMITTED — await Keaton review):**
+1. `esp32/fluckflock_companion/platformio.ini` — Removed `-DARDUINO_USB_CDC_ON_BOOT=1` (framework bug: HardwareSerial.cpp doesn't resolve Serial when HWCDC enabled). Debug output now shared with Flipper UART link (UART0).
+2. `esp32/fluckflock_companion/src/main.cpp` — Replaced all `Serial0` with `Serial` (Serial0 undefined without USB CDC boot flag).
+
+**Binary:** Flash 45.9% / RAM 11.2%  
+**Chip verified:** ESP32-S2 rev v1.0, all 4 partitions written/verified  
+**ROM bootloader:** VID_303A/PID_0002 on COM8; app mode on COM6/COM7
+
+**Flash procedure:** Manual bootloader entry required (no DTR/RTS auto-reset over USB CDC). Hold BOOT, tap RESET, release BOOT, then `python -m platformio run -t upload --upload-port COM8`.
+
+**Action items for Keaton:** Review platformio.ini and main.cpp changes before merge. Consider dedicated debug UART or USB CDC approach for v2.
+
