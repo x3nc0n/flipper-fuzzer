@@ -832,6 +832,291 @@ McManus added `radio_wifi_power_on()` / `radio_wifi_power_off()` to the `radio_w
 
 ---
 
+### 2026-07-18: Wi-Fi Beacon Persistence / Dwell Strategy
+
+**By:** Keaton (Lead / Firmware Architect)
+**Date:** 2026-07-18
+**Status:** PROPOSED — awaiting user approval
+
+#### Problem
+
+`chaff_engine_step()` emits exactly one Wi-Fi beacon per timer interval with a fresh random SSID+BSSID each step. Real APs beacon at ~10 Hz on a stable SSID/BSSID. Wi-Fi scanners (Windows, phones) require several consecutive beacons from the same SSID/BSSID before listing an AP. Result: almost no fake SSIDs appear in scan lists.
+
+#### Spec Reconciliation
+
+Spec §7 says "ever-changing" and "no identifier should repeat within a rolling window of at least 1000 emitted identifiers per radio." A **bounded dwell** (same SSID/BSSID repeated for ~1–2 seconds at 100 ms beacon cadence = 10–20 repetitions, then rotate) does NOT violate the spec:
+
+- The 1000-window non-repeat rule applies to *distinct identifiers*, not individual frames. A dwell window reuses the *same* identifier briefly, then it is retired permanently. At 2s dwell / 1s interval between rotations, the system still produces ~30+ unique SSIDs/min — thousands/hour, all non-repeating after their dwell expires.
+- "Ever-changing" describes the *population over time*, not per-frame uniqueness. Real-world beacon floods (the surveillance countermeasure this is modeled on) all use dwell; single-shot beacons are invisible and therefore zero-value chaff.
+- **Invisible chaff is useless chaff.** The spec's purpose (§1, §4) is to *pollute scan results*. If beacons never appear in scan lists, they fail the stated goal entirely.
+
+**Conclusion:** Bounded dwell is spec-compatible and in fact *required* to meet the spec's stated goal.
+
+#### Recommended Approach: B (ESP32 Autonomous Beaconing) — with pool extension toward C
+
+##### Why B over A
+
+| Factor | A (Flipper dwell loop) | B (ESP autonomous) |
+|---|---|---|
+| Beacon timing accuracy | ~100ms jitter from UART round-trips | Hardware timer, sub-ms jitter — looks like a real AP |
+| UART load | 10–20x increase per SSID | Same as today: one FFB command per rotation |
+| Engine complexity | Needs Wi-Fi sub-cadence / sub-timer in chaff_engine | No change to engine timer model |
+| Realism | Bursty (gaps between UART sends) | Continuous, indistinguishable from real AP |
+| ESP firmware change | None | Yes — ESP loops on last-received beacon until next FFB |
+
+**B wins on every axis.** The only cost is an ESP firmware change, which is minor: the ESP `loop()` adds a millis()-based re-transmit of the last beacon frame every ~100ms while injection is enabled. The UART protocol is unchanged (FFB still means "set current beacon"); semantics shift from "inject once" to "set active beacon."
+
+##### Pool Extension (toward C, future)
+
+Once B is working, extending to a pool of N simultaneous SSIDs (C) is a natural next step: the ESP holds N beacon entries and round-robins through them at 100ms intervals. This produces the "busy coffee shop" effect. However, **B alone is sufficient to make Wi-Fi chaff visible** and should ship first. Pool can be a follow-on if the user wants it.
+
+#### Setting vs. Default
+
+**Changed default, no new setting.** The ESP simply re-beacons continuously; the Flipper side is unaware. The existing Interval setting controls how often the SSID/BSSID *rotates* (new identity), which is the user-facing knob. No new UI needed.
+
+If pool mode (C) is later added, a "Wi-Fi Density" setting (1 / 4 / 8 simultaneous SSIDs) could be exposed, but that's out of scope for this decision.
+
+#### Implementation Checklist
+
+##### McManus (radio / ESP RF owner)
+
+1. **ESP32 `main.cpp`:** After `cmd_beacon()` stores the built frame, add a `millis()`-based loop in `loop()` that re-transmits the stored frame every ~102ms (matching the beacon interval field in the frame) while `injection_enabled && has_active_beacon`. Clear `has_active_beacon` on `FFOFF`.
+2. **Beacon interval constant:** Use 102ms (1 TU ≈ 1.024ms × 100 TU = 102.4ms) to match the frame's declared beacon interval field. McManus to confirm exact value from his RF analysis.
+3. **No UART protocol change.** `FFB` semantics shift from "inject once" to "set active beacon" — this is an ESP-internal behavior change, transparent to the Flipper side.
+
+##### Fenster (engine / app / UI wiring)
+
+1. **No engine changes required.** `chaff_engine_step()` continues sending one `FFB` per interval. The ESP handles repetition autonomously.
+2. **No UI changes required.** Existing Interval setting controls rotation cadence, which is the correct user-facing control.
+
+##### Keaton (spec / task / review)
+
+1. **spec.md §5.3 update (after user approval):** Add a sentence: "The companion firmware continuously re-transmits the most recent beacon at the standard 802.11 beacon interval (~100 TU) until the next `FFB` command replaces it or `FFOFF` is received."
+2. **task-flipper.md update (after user approval):** Add checklist item under Wi-Fi section: `[ ] ESP32 autonomous beacon re-transmission — companion re-beacons last FFB at ~100ms until replaced or FFOFF`.
+3. **Review gate:** Review McManus's ESP32 changes before merge.
+
+#### Risks
+
+- **Regulatory:** No change — we're already injecting beacons; this just increases the rate to match what real APs do. Frame content is identical.
+- **ESP32 CPU/heat:** Beacon TX at 10 Hz is trivial for the ESP32 (real APs do this 24/7). No concern.
+- **Stale beacon after Flipper crash:** If the Flipper crashes without sending FFOFF, the ESP continues beaconing the last SSID indefinitely. Acceptable — the ESP has no watchdog for the Flipper link today either. A future enhancement could add a UART idle timeout on the ESP side.
+
+#### Decision
+
+**Recommend approach B. Ship as changed ESP default. No new Flipper-side settings. Spec + task-flipper.md updates pending user approval.**
+
+---
+
+### 2026-07-18: Wi-Fi Beacon Visibility: Options & Recommended Parameters
+
+**Author:** McManus (Wireless / RF Dev)  
+**Date:** 2026-07-18  
+**Status:** PROPOSED — awaiting user approval
+
+#### Problem
+
+`chaff_engine_step()` generates one SSID+BSSID and calls `radio_wifi_emit()` once per timer tick.
+`radio_wifi_emit()` sends one `FFB` command. `cmd_beacon` on the ESP32 calls `esp_wifi_80211_tx()`
+once and returns. Result: single-shot rotating beacons that OS Wi-Fi scanners silently drop.
+
+**Why scanners miss them:** Windows/Android/iOS Wi-Fi scan daemons require multiple beacon
+frames from the same BSSID within their scan window (~2–4 s) before surfacing an AP in results.
+Real APs beacon at 100 TU ≈ 102.4 ms (≈10×/sec). One beacon is effectively invisible.
+
+#### UART Throughput Math (115200 baud baseline)
+
+```
+115200 baud, 8N1  →  10 bits/byte  →  11 520 bytes/sec effective
+
+FFB command size:
+  "FFB " (4) + 12 hex BSSID (12) + " " (1) + SSID + "\n" (1)
+  Min (1-char SSID): 19 bytes
+  Avg (~14-char SSID): 32 bytes
+  Max (32-char SSID):  50 bytes
+
+Rates at 32-byte average:
+  10 FFB/s  →  320 bytes/s  =  2.8% of UART capacity   ✓
+  20 FFB/s  →  640 bytes/s  =  5.6%                     ✓
+  50 FFB/s  →  1 600 bytes/s = 13.9%                    ✓
+
+TX time per frame (32 bytes at 115200):
+  32 × 10 / 115200 ≈ 2.8 ms  — trivial; no UART bottleneck at these rates.
+```
+
+115200 baud is **not a constraint** for any option below.
+
+#### 2.4 GHz Airtime
+
+Each beacon (~119 bytes frame at 1 Mbps DSSS basic rate) ≈ 1 ms airtime.
+
+| Rate          | Airtime/sec | Channel utilization |
+|---|---|---|
+| 10 beacons/s  | ~10 ms      | ~1%                 |
+| 80 beacons/s  | ~80 ms      | ~8%                 |
+
+No congestion concern at any option's rates.
+
+#### Options
+
+##### Option A — Flipper-Driven Dwell (no ESP firmware change)
+
+**Concept:** Flipper holds one SSID+BSSID and re-sends `FFB` every 100 ms for a configurable
+dwell window, then rotates to a new SSID+BSSID.
+
+**Mechanism change:** `chaff_engine` timer fires at **100 ms**. Engine tracks a `wifi_dwell_remaining`
+counter. When > 0: re-emit same SSID+BSSID, decrement. When 0: generate fresh SSID+BSSID, reset
+counter to `dwell_ticks` (= `dwell_ms / 100`).
+
+**Recommended default parameters:**
+
+| Parameter          | Value           | Range (user-tunable)    |
+|---|---|---|
+| Beacon spacing     | 100 ms          | fixed (1 TU standard)   |
+| Dwell window       | **1 500 ms**    | 500 ms – 5 000 ms       |
+| Beacons per SSID   | **15**          | 5 – 50                  |
+| Distinct SSIDs/min | **40**          | 12 – 120                |
+| UART bytes/sec     | 320 (avg)       | 2.8% of 115200           |
+
+*At 1 500 ms dwell:* scanner sees AP appear → 15 beacons → AP ages out; clear "real AP" pattern.  
+*At 500 ms (aggressive):* 120 SSIDs/min, 5 beacons/SSID — borderline visibility on slow scanners.  
+*At 5 000 ms (max):* 12 SSIDs/min, 50 beacons — very visible, low diversity.
+
+**ESP firmware change needed:** ❌ None  
+**Realism:** ✅ Excellent — 100 ms spacing is exactly 100 TU standard AP behaviour  
+**Chaff volume:** ✅ Good — 40 distinct SSIDs/min at default  
+**Implementation effort:** Low — add `wifi_dwell_remaining` counter to `ChaffEngine` struct, adjust timer period
+
+##### Option B — ESP Autonomous Beaconing
+
+**Concept:** One `FFB` command sets the "current beacon" on the ESP. The ESP firmware re-transmits
+the frame every 100 ms autonomously, until a new `FFB` replaces it.
+
+**ESP firmware change shape (main.cpp):**
+```cpp
+// New globals:
+static uint8_t last_frame[128];
+static size_t  last_frame_len = 0;
+static uint32_t last_beacon_ms = 0;
+
+// In loop(), add:
+if(injection_enabled && last_frame_len > 0) {
+    uint32_t now = millis();
+    if(now - last_beacon_ms >= 100) {
+        esp_wifi_80211_tx(WIFI_IF_STA, last_frame, (int)last_frame_len, false);
+        last_beacon_ms = now;
+    }
+}
+
+// In cmd_beacon(): build frame into last_frame, set last_frame_len, last_beacon_ms = millis()
+// FFOFF already stops injection, which halts the re-tx loop (injection_enabled = false)
+```
+
+**Protocol semantics change:** `FFB` becomes "set current beacon" (idempotent update);
+a new `FFB` replaces the current beacon seamlessly. No new command needed.
+
+**Recommended parameters:**
+
+| Parameter          | Value           | Notes                         |
+|---|---|---|
+| ESP beacon interval| **100 ms**      | hard-coded in ESP loop        |
+| Flipper rotation   | **1 500 ms**    | Flipper sends new FFB every N |
+| Beacons per SSID   | ~15             | 1 500 ms / 100 ms             |
+| Distinct SSIDs/min | **40**          | same as Option A              |
+| UART bytes/sec     | **~21** (avg)   | 1 FFB per 1.5 s = 0.2% UART  |
+
+**ESP firmware change needed:** ✅ Yes (small, ~20 lines) — but ESP has uncommitted changes pending Keaton review  
+**Realism:** ✅✅ Best — AP beacons with hardware timer precision  
+**Chaff volume:** ✅ Same diversity as A at same rotation rate  
+**UART load:** ✅✅ Lowest possible (~0.2% vs 2.8%)  
+**Implementation effort:** Medium — needs ESP firmware edit + Keaton review gate
+
+##### Option C — ESP Pool of N Beacons
+
+**Concept:** The ESP maintains a ring buffer of N SSID+BSSID entries. It round-robins beacon
+transmission at 100 ms per slot, so all N APs are visible concurrently. Flipper slowly
+refreshes pool entries with new SSIDs.
+
+**Recommended N: 8**
+
+| Parameter              | N=4 variant  | **N=8 (recommended)**  | N=16 variant   |
+|---|---|---|---|
+| Per-AP beacon interval | 400 ms       | **800 ms**             | 1 600 ms       |
+| Concurrent visible APs | 4            | **8**                  | 16             |
+| Visibility margin      | ✅ Good       | ✅ OK (marginal)*       | ⚠️ Borderline   |
+| Distinct SSIDs/min     | 60           | **60**                 | 60             |
+| Flipper refresh rate   | 1/sec        | **1/sec**              | 1/sec          |
+| UART bytes/sec         | ~32 (avg)    | **~32**                | ~32            |
+
+\* Windows scan window ~2–4 s: at 800 ms/beacon, scanner catches 2.5–5 beacons per AP per window
+— sufficient for most OS scanners to list the AP.
+
+**New protocol commands needed:**
+```
+FFBP <slot> <bssid12> <ssid>\n   — set pool slot (0..N-1)
+FFBPC\n                           — clear pool (stop all)
+```
+Or reuse `FFB` with sequential BSSIDs (ESP auto-assigns slot by BSSID).
+
+**ESP firmware change needed:** ✅ Yes (significant — pool array, slot management, ~60 lines)  
+**Realism:** ✅ Good for N≤8; each BSSID beacons at 800 ms vs real 100 ms — slightly slow but convincing  
+**Chaff volume:** ✅✅ Best — N APs always visible + high rotation  
+**Implementation effort:** High — needs new protocol commands + pool data structure
+
+#### Comparison Table
+
+| Option | Beacon spacing | Distinct SSIDs/min | Concurrent APs | Realism        | UART bytes/sec | ESP change? | Effort |
+|---|---|---|---|---|---|---|---|
+| **A — Flipper Dwell** | 100 ms per SSID | **40** | 1 at a time | ✅✅ Excellent | 320 | ❌ None | Low |
+| **B — ESP Autonomous** | 100 ms (HW timer) | **40** | 1 at a time | ✅✅✅ Best | 21 | ✅ ~20 lines | Medium |
+| **C — ESP Pool N=8** | 800 ms per AP | **60** | **8** | ✅ Good | 32 | ✅ ~60 lines | High |
+| *Current (broken)* | one-shot | 60 (0 visible) | 0 | ❌ Invisible | 32 | — | — |
+
+#### Recommended Default: **Option A** (ship now) → **Option B** (after Keaton ESP review)
+
+##### Why Option A first
+
+- **Zero ESP firmware risk** — works with the ESP as-is, no dependency on Keaton's pending review.
+- **Near-perfect realism** — 100 ms beacon spacing is exactly 100 TU real AP behaviour.
+- **40 SSIDs/min** is high chaff diversity; well above practical tracking utility.
+- **Simple change:** add one `uint8_t wifi_dwell_remaining` counter + stored SSID/BSSID to `ChaffEngine`, change timer period to 100 ms.
+- **UART load is trivially low** (2.8% of 115200).
+
+##### Option A exact parameters to ship
+
+```
+Timer period:      100 ms  (hard)
+Default dwell:   1 500 ms  (15 beacons per SSID)
+Min dwell:         500 ms  (5 beacons — aggressive chaff, may miss slow scanners)
+Max dwell:       5 000 ms  (50 beacons — very visible, low diversity)
+User step:         500 ms  increments in UI
+```
+
+**Chaff diversity at defaults:** 60 s / 1.5 s = **40 distinct SSIDs/min**  
+**Visibility expectation:** Windows netsh, Android, iOS all show faked APs reliably.  
+**Gold standard (Wireshark/tshark):** All beacons visible immediately at 100 ms intervals.
+
+##### Why migrate to Option B later
+
+Once ESP firmware changes are unblocked (Keaton review), Option B replaces A:
+- Achieves the same 40 SSIDs/min at 1/100th the UART bandwidth
+- Beacon interval is driven by ESP hardware (more accurate, immune to Flipper timer jitter)
+- Flipper code simplifies: remove dwell counter, just send `FFB` on rotation
+
+##### Option C: future enhancement
+
+After B: add pool support for "density mode" (user selects N=4/8 → N fake APs always visible).
+Good for demo scenarios. Not needed for core chaff.
+
+#### BLE Note (brief)
+
+BLE advert scanners behave differently from Wi-Fi scanners. BLE scan duty cycles (window/interval)
+typically catch a single advertisement within 1–3 advert intervals (default 100 ms advert interval
+→ caught within 300 ms). Single-shot BLE adverts ARE generally caught by iOS/Android, unlike Wi-Fi.
+**BLE does not need the dwell fix.** Current single-shot BLE behaviour is acceptable for chaff.
+If BLE visibility becomes a concern later, reduce advert interval to 50–75 ms.
+
+---
+
 ## Governance
 
 - All meaningful changes require team consensus

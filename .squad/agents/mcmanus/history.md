@@ -1,140 +1,74 @@
-# Project Context
+# McManus: RF/Wireless Developer — History (Summarized 2026-07-18)
 
-- **Owner:** John Spaid
-- **Project:** FluckFlock — a Flipper Zero "chaff" broadcaster that continuously emits large volumes of plausible, ever-rotating fake wireless identifiers (Wi-Fi SSIDs/BSSIDs, BLE addresses/advert names, Sub-GHz RF noise/beacons) to pollute passive/dragnet tracking systems (Wi-Fi/BLE MAC tracking, SSID probe logging, RF fingerprinting).
-- **Stack:** Flipper Zero firmware in C (FAP app, ufbt/fbt build, furi APIs, ViewDispatcher/SceneManager). Native BLE + Sub-GHz (CC1101); Wi-Fi via the official Flipper Wi-Fi Dev Board (ESP32) where present.
-- **Target:** Flipper Zero ONLY — single hardware target (the earlier "two hardware tiers / two implementations" idea was scrubbed per user directive 2026-07-09). One implementation checklist: task-flipper.md.
-- **Created:** 2026-07-09
+**Owner:** John Spaid
+**Project:** FluckFlock — Flipper Zero wireless chaff broadcaster
+**Role:** RF/wireless specialist
+**Created:** 2026-07-09
 
-## Learnings
+## Learnings & Status
 
-<!-- Append new learnings below. Each entry is something lasting about the project. -->
+### 2026-07-09 — RF Drivers, Identifiers, PRNG, HAL (summary)
 
-### 2026-07-09 — Generator approach, table sizes, radio HAL assumptions, radio driver signatures
+**PRNG:** xoshiro256** seeded via splitmix64; Lemire's bounded random; host-testable pure C.
+**OUI table:** 68 globally-administered unicast entries (Apple, Samsung, Cisco, TP-Link, Netgear, Espressif, Intel, Google, Amazon, Ubiquiti, Realtek, Aruba).
+**SSID table:** 10 templates + 40 first names, 14 ISP prefixes, 27 static names.
+**BLE names:** 5 pools (earbuds/wearables/speakers/trackers/phones) + possessive pattern (30 × 9).
+**BLE MAC:** Random static; out[0] = `(byte | 0xC2) & 0xFE`.
+**Radio signatures:** BLE (init/deinit/emit), Sub-GHz (init/deinit/emit), Wi-Fi (detect/init/deinit/emit).
+**Sub-GHz:** 433.92 MHz OOK 270 kHz on CC1101; region lock enforced; 60-byte payload max.
+**Wi-Fi HAL:** Stubbed pending protocol decision.
 
-**PRNG:**  
-Chose xoshiro256** seeded via splitmix64 (4 × 64-bit state, 256-bit total).
-splitmix64 guarantees non-zero state even from seed=0.  chaff_rng_bounded()
-uses Lemire's nearly-divisionless algorithm to eliminate modulo bias.
-Pure C, malloc/free only — host-testable without any Flipper SDK.
+**Result:** ufbt build SUCCEEDS; host tests (71k assertions) PASS; all blockers RESOLVED.
+**Verdict:** Project approved 2026-07-09.
 
-**OUI table (`oui_table.h`):**  
-68 entries covering Apple, Samsung, Cisco, TP-Link, Netgear, Espressif, Intel,
-Google, Amazon, Ubiquiti, Realtek, Aruba.  `CHAFF_OUI_COUNT` macro for iteration.
-All entries verified to have bit0=bit1=0 (globally-administered unicast); the
-generator also enforces this with an explicit mask on out[0].
+### 2026-07-09 — Wi-Fi UART Protocol & ESP32 Companion (summary)
 
-**SSID table (`ssid_table.h`):**  
-10 templates (SSID_TEMPLATE_COUNT): ISP-prefix+hex, ISP-prefix+decimal,
-"<Name>'s <Device>", static/well-known names, HP-Print pattern, Wi-Fi Direct,
-AndroidAP, Redmi Note, Setup<hex>, ASUS_<hex>.  Pool sizes: 40 first names,
-14 ISP prefixes, 27 static names, 5 HP models, 11 hotspot devices.
+**Protocol:** `FF?` → `FF!v1`, `FFON` → `OK`, `FFOFF` → `OK`, `FFB <bssid12> <ssid>`
+**Baud:** 115200 8N1 on FuriHalSerialIdUsart (Flipper GPIO 13 TX / 14 RX)
+**Companion:** ESP32-S2 Arduino; promiscuous mode; `esp_wifi_80211_tx()` raw beacon injection
+**Files:** `wifi_proto.h/c` (pure C, host-testable), `radio_wifi.c` (full UART driver), `esp32/` companion
+**Verdict (Keaton):** APPROVE; minor cleanup notes (Serial.println `\r\n`, seq numbers, doc stale comment)
 
-**BLE name table (`ble_name_table.h`):**  
-5 pools: earbuds (23), wearables (15), speakers (14), trackers (10), phones (9).
-Possessive pattern "<Name>'s <Device>" uses 30 first-names × 9 device-suffixes.
-~30% chance of appending a 2-digit numeric suffix for population diversity.
+### 2026-07-18 — RF Validation & Identifier Signatures (summary)
 
-**BLE MAC address bit convention:**  
-Reconciled Keaton's contract (bit0=unicast, bit1=LA) with BLE Core Spec §6.B.1.3.2.1
-(random static: bits[47:46]=0b11 = byte[0] bits[7:6]).  Final mask on out[0]:
-`(out[0] | 0xC2) & 0xFE` — sets bits 7,6,1; clears bit 0.
+**Wi-Fi channel:** 6 (2.4 GHz)
+**Sub-GHz frequency:** 433.92 MHz OOK 270 kHz
+**SSID pool:** 10 templates (ISP+hex, ISP+decimal, Name's Device, well-known, HP-Print, Wi-Fi Direct, AndroidAP, Redmi, Setup, ASUS)
+**BSSID OUI:** 68 real vendors (Apple, Samsung, Cisco, TP-Link, Netgear, Espressif, Intel, Google, Amazon, Ubiquiti, Realtek, Aruba)
+**BLE names:** Earbuds (25%), wearables (17%), speakers (17%), trackers (17%), phones (8%), possessive (17%); ~30% numeric suffix
+**Validation method:** netsh-diff (Windows), Wireshark monitor-mode (gold standard)
 
-**Radio HAL — BLE:**  
-Implemented against `furi_hal_bt_extra_beacon_set_data()` / `set_config()` /
-`start()` / `stop()` / `is_active()`.  GapExtraBeaconConfig fields assumed:
-min/max_adv_interval_ms (uint16_t), adv_channel_map (uint8_t, 0x07),
-adv_power_level (int8_t), address_type (BLE_GAP_ADDR_TYPE_RANDOM_STATIC=1),
-address[6].  MAC byte order for set_config: reversed (little-endian, index 5→0).
-Advertisement payload: Flags(0x01/0x06) + Complete Local Name(0x09) + TX Power(0x0A/0x00).
+### 2026-07-18 — OTG Power, Boot Settle, Detect Retry (summary)
 
-**Radio HAL — Sub-GHz:**  
-Uses `FuriHalSubGhzPresetOok270Async` (OOK 270 kHz).  Default freq: 433.92 MHz.
-furi_hal_subghz_set_frequency_and_path() enforces region lock; returns 0 on
-rejection.  furi_hal_subghz_write_packet() assumed present; if missing, use
-manual FIFO writes + furi_hal_subghz_tx() strobe.  Payload capped at 60 bytes.
+**OTG API:** `furi_hal_power_enable_otg()` / `disable_otg()` / `is_otg_enabled()`
+**Boot settle:** 1500 ms (account for serial init, USB CDC startup, Arduino framework jitter)
+**Detect flow:** pre-flush + 3 attempts × 400 ms timeout + 150 ms retry gaps
+**Power lifecycle:** enable in `radio_wifi_power_on()`, disable in `radio_wifi_power_off()`
+**Idempotent:** guards prevent double-enable; safe to power-off unconditionally
 
-**Radio HAL — Wi-Fi:**  
-Fully stubbed. detect() returns false unconditionally.  UART protocol proposed:
-Marauder-compatible ASCII at 115200 baud on FuriHalSerialIdUsart.
-Command: `beacon -s <SSID> -b <XX:XX:XX:XX:XX:XX>\n`.  Waiting on Keaton to
-gate the protocol decision before implementing.
+### 2026-07-18 — Beacon Visibility: Options & Recommended Parameters (summary)
 
-### 2026-07-09 — FINAL OUTCOME
-
-- **ufbt build against Flipper SDK 1.4.3: SUCCEEDS**
-- **Host test suite (~71k assertions): all PASS**
-- **All blockers and major issues: RESOLVED via cross-author fix round (locked out from own fixes per architecture rules)**
-- **Project approved for merge**
-
-**Radio driver signatures (stable — published to mcmanus-radio-interface.md):**
-```
-void radio_ble_init(void);
-void radio_ble_deinit(void);
-bool radio_ble_emit(const uint8_t mac[6], const char* name);
-
-void radio_subghz_init(void);
-void radio_subghz_deinit(void);
-bool radio_subghz_emit(const uint8_t* payload, size_t len);
-
-bool radio_wifi_detect(void);
-bool radio_wifi_init(void);
-void radio_wifi_deinit(void);
-bool radio_wifi_emit(const char* ssid, const uint8_t bssid[6]);
-```
-
-Note: radio_wifi.h was pre-stubbed by another agent with `radio_wifi_send(ssid, ssid_len, bssid)`.
-McManus updated it to `radio_wifi_emit(ssid, bssid)` for naming consistency.
-Fenster must use the updated header.
-
-### 2026-07-09 — Wi-Fi Dev Board: UART protocol, driver, and companion firmware implemented
-
-**Serial API (SDK 1.4.3, verified):**
-- `furi_hal_serial_control_acquire(FuriHalSerialIdUsart)` / `_release(h)` for handle lifecycle.
-- `furi_hal_serial_init(h, 115200)` / `furi_hal_serial_deinit(h)`.
-- TX: `furi_hal_serial_tx(h, buf, len)` + `furi_hal_serial_tx_wait_complete(h)`.
-- RX for handshake: `furi_hal_serial_async_rx_start(h, cb, ctx, false)` — callback runs in
-  interrupt context; must call `furi_hal_serial_async_rx_available()` and
-  `furi_hal_serial_async_rx()` **only from within that callback**.  Signal main thread via
-  `FuriSemaphore` (alloc/release from ISR is safe; acquire with timeout on main thread).
-- `furi_hal_serial_async_rx_stop(h)` to stop.
-- Acquiring USART suspends the Flipper serial console — expected for dev-board apps.
-
-**Protocol (ASCII, newline-terminated, 115200 8N1):**
-- `FF?\n` → `FF!v1\n` — handshake/detect (400 ms timeout).
-- `FFON\n` → `OK\n` — enter injection mode (init).
-- `FFOFF\n` → `OK\n` — exit injection mode (deinit, fire-and-forget).
-- `FFB <bssid12hexlower> <ssid>\n` — inject one beacon (fire-and-forget).
-
-**Protocol module:** `flipperzero/fluckflock/radio/wifi_proto.h` + `wifi_proto.c` — pure C,
-no Flipper SDK, host-testable.  Four functions: `wifi_proto_build_handshake`,
-`wifi_proto_build_on`, `wifi_proto_build_off`, `wifi_proto_build_beacon`.
-
-**Companion firmware:** `esp32/fluckflock_companion/` — PlatformIO, `esp32-s2-saola-1`,
-framework=arduino.  Parses the line protocol, uses `esp_wifi_80211_tx(WIFI_IF_STA, ...)` for
-injection after `esp_wifi_set_promiscuous(true)`.  Debug output on USB CDC (`Serial0`),
-Flipper UART on `Serial` (pins 43 TX / 44 RX → Flipper GPIO 14 RX / 13 TX).
+**Root cause:** Single-shot beacons invisible to OS scanners (need multiple frames from same BSSID)
+**Option A (Flipper dwell):** 100 ms timer, 1.5s hold per SSID; 40 SSIDs/min; no ESP change; 2.8% UART
+**Option B (ESP autonomous):** ESP re-tx every 100ms; ~20-line firmware; same 40 SSIDs/min; 0.2% UART
+**Option C (ESP pool N=8):** 8 concurrent APs; ~60-line firmware; future "density mode"
+**Recommendation:** Ship A now (zero risk), migrate to B later (ideal), add C later (future)
+**115200 baud:** Not a bottleneck at any rate (10–50 FFB/sec fit comfortably)
 
 ---
 
-### 2026-07-09 — Correct notification include path in SDK 1.4.3 (f7)
+### 2026-07-18 — Option B ESP Autonomous Beacon Re-transmission Implemented (summary)
 
-`notification/notification_app.h` does **not** exist in Flipper SDK 1.4.3.  The correct
-includes are:
+**Architecture:** Store last frame + re-tx every 100ms in ESP loop() while injection enabled
+**Idempotent:** Errors don't clear store (stale beacon repeats until next valid FFB)
+**Injection flow:** start clears store, stop clears store (no orphaned beacons)
+**Millis rollover:** Unsigned subtraction safe on uint32_t
+**PlatformIO build:** SUCCESS; 45.9% flash, 11.2% RAM
+**Status:** Pending hardware validation + Keaton code review
 
-```c
-#include <notification/notification.h>          // NotificationApp typedef + notification_message()
-#include <notification/notification_messages.h>  // built-in NotificationSequence presets
-```
+### 2026-07-09 — Notification API & Hardware Validation (summary)
 
-`NotificationApp` (opaque struct) and `notification_message()` live in `notification.h`.
-`notification_messages.h` provides the pre-built sequences (e.g. `&sequence_blink_red_10`).
-Verified via: `/home/x3nc0n/.ufbt/current/sdk_headers/f7_sdk/applications/services/notification/notification.h`.
-
-### 2026-07-09 — Real hardware validation: FAP confirmed working on Flipper Zero
-
-Deployed to physical Flipper Zero over USB COM5 via `ufbt launch` (Windows + SDK 1.4.3).
-User visually confirmed app running with live BLE + Sub-GHz emission counters incrementing.
-Wi-Fi companion firmware implemented but dev board not yet physically available for testing.
-See orchestration-log and session log for full deployment details.
+**Include path (SDK 1.4.3):** `notification/notification.h` + `notification/notification_messages.h` (NOT notification_app.h)
+**Hardware test:** FAP deployed successfully to physical Flipper Zero; BLE + Sub-GHz counters confirmed incrementing
+**Wi-Fi Dev Board:** Firmware ready, awaiting physical integration test
 
