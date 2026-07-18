@@ -527,6 +527,69 @@ This must be documented in the project README and any flash scripts.
 
 ---
 
+### 2026-07-18: ESP32-S2 USB CDC Handshake Verification — FAIL
+
+**Filed by:** Fenster  
+**Date:** 2026-07-18T21:27Z  
+**Severity:** Blocker — Wi-Fi companion board cannot be verified or used via USB CDC  
+**Status:** Under review (Keaton)
+
+#### Summary
+
+The `FF?` → `FF!v1` handshake verification attempt on the freshly-flashed ESP32-S2 board **FAILED** for two compounding reasons:
+
+1. **Hardware not present**: Board's USB CDC (VID_303A/PID_4001) shows `Present: False` in Windows PnP. COM6 and COM7 cannot be opened.
+
+2. **Firmware routes command protocol to UART0 hardware, not USB CDC** (critical design issue): `ARDUINO_USB_CDC_ON_BOOT=1` was removed from `platformio.ini` as a workaround for a build error. Without it, `Serial` = UART0 hardware (GPIO 43 TX / GPIO 44 RX). All `Serial.read()` / `Serial.println()` calls in `main.cpp` — including `process_line()` and the `FF?` / `FF!v1` handler — operate on UART0 hardware pins, not USB CDC.
+
+#### Root Cause
+
+The build fix that removed `ARDUINO_USB_CDC_ON_BOOT=1` broke the intended serial routing. The original design expected `Serial` = USB CDC (for debug + command protocol), with hardware UART0 as the Flipper physical link.
+
+#### Recommended Action
+
+Option A (cleanest): Restore `ARDUINO_USB_CDC_ON_BOOT=1`, fix `HardwareSerial.cpp:51` error via platform upgrade or explicit `HWCDC` include. Matches original design intent.
+
+**Status:** Keaton to review and decide on fix approach. Current firmware edits remain uncommitted pending review.
+
+---
+
+### 2026-07-18: UART0 Build IS Correct for Flipper Physical Link — CONFIRMED
+
+**Filed by:** Fenster  
+**Date:** 2026-07-18T21:35Z  
+**Status:** CONFIRMED — Flipper physical link path is operational  
+
+#### Summary
+
+Hypothesis *"the current UART0 build works over the Flipper expansion-header link"* is **CONFIRMED**. The prior "handshake FAIL" was USB-CDC-only and does **NOT** affect the Flipper physical link.
+
+#### Evidence / Reasoning
+
+**Protocol exact match:**
+- Flipper sends `FF?\n` (wifi_proto.h), checks for `FF!` response (radio_wifi.c)
+- ESP32 receives via UART0, responds `FF!v1\n` to `FF?` via same UART0 (main.cpp)
+- Both use 115200 baud
+- Strings and baud match exactly
+
+**UART routing:**
+- `Serial.begin()` called twice in setup(); second call wins: UART0 GPIO 43 (TX) → Flipper GPIO 14 RX, GPIO 44 (RX) ← Flipper GPIO 13 TX at 115200 baud
+- Flipper driver acquires FuriHalSerialIdUsart (expansion header USART, GPIO 13/14) at 115200 baud
+- **The two endpoints are correctly wired and configured**
+
+**Physical verification (2026-07-18):**
+- End-to-end FF handshake verified via Flipper USB-UART Bridge:
+  - `FF?\n` → received `FF!v1\r\n` ✅
+  - `FFON\n` → received `OK\r\n` ✅  
+  - `FFOFF\n` → received `OK\r\n` ✅
+- One-time `\n` pre-flush needed on first bridge open to clear bridge-init UART noise; FAP's 500ms open-delay covers this in production
+
+#### Conclusion
+
+**The current flashed firmware is ready for Flipper physical integration.** No reflash or USB CDC fix required for the Flipper expansion header communication path. Only physical mount test remains: board on Flipper expansion connector → FAP deployed via `python -m ufbt launch` → check `wifi_detected` flag.
+
+---
+
 ## Governance
 
 - All meaningful changes require team consensus
