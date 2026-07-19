@@ -1,0 +1,72 @@
+menu "FluckFlock Configuration"
+
+    config FLUCKFLOCK_ENABLE_WIFI
+        bool "Enable Wi-Fi beacon chaff"
+        default y
+        help
+            Broadcasts rotating fake 802.11 beacon frames (SSID + BSSID) via
+            raw-frame injection. See spec.md section 5.
+
+    config FLUCKFLOCK_ENABLE_BLE
+        bool "Enable BLE advertisement chaff"
+        default y
+        help
+            Rotates a NimBLE random address + advertised name + manufacturer
+            data every rotation tick. See spec.md section 5.
+
+    config FLUCKFLOCK_ROTATION_INTERVAL_MS
+        int "Base rotation interval (ms)"
+        default 1000
+        range 200 60000
+        help
+            Base identity-rotation period per spec.md section 5.1. Actual
+            interval is this value plus a random jitter (see below).
+
+    config FLUCKFLOCK_JITTER_MS
+        int "Rotation jitter, +0..N (ms)"
+        default 400
+        range 0 5000
+        help
+            Random jitter added on top of the base rotation interval so
+            rotation isn't a detectable metronome.
+
+    config FLUCKFLOCK_WIFI_BEACONS_PER_TICK
+        int "Wi-Fi fake beacon frames per rotation tick"
+        default 30
+        range 1 100
+        help
+            Number of distinct fake SSID/BSSID beacon frames injected per
+            tick (concurrent identity count for the Wi-Fi radio). Tune down
+            if timing headroom is tight with a short rotation interval.
+
+    config FLUCKFLOCK_WIFI_CHANNEL
+        int "Wi-Fi channel for beacon injection (1-13)"
+        default 6
+        range 1 13
+
+    config FLUCKFLOCK_NO_REPEAT_WINDOW
+        int "No-repeat window (identities remembered per radio)"
+        default 500
+        range 10 5000
+        help
+            Each radio (Wi-Fi, BLE) keeps its own ring buffer of this many
+            recently-used identity hashes and retries generation on a
+            collision, per spec.md section 5.1.
+
+    config FLUCKFLOCK_STATUS_LED_GPIO
+        int "Status LED GPIO number"
+        default 2
+        help
+            Most ESP32 devkits have an onboard LED on GPIO2. Change if
+            wiring an external LED elsewhere.
+
+    config FLUCKFLOCK_VERBOSE_LOGGING
+        bool "Verbose serial logging of generated identifiers (debug only)"
+        default n
+        help
+            When enabled, logs every generated SSID/MAC/BLE identity to the
+            serial console for debugging. Never written to flash. Keep
+            disabled (default) for normal/field use -- spec.md section 5.4
+            calls for no PII/identifier logging persisted by default.
+
+endmenu
