@@ -1,0 +1,22 @@
+idf_component_register(
+    SRCS
+        "fluckflock_main.c"
+        "config.c"
+        "ssid_words.c"
+        "identity_gen.c"
+        "dedupe.c"
+        "wifi_beacon.c"
+        "ble_adv.c"
+        "status_led.c"
+        "console_cfg.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        esp_wifi
+        esp_event
+        esp_netif
+        nvs_flash
+        bt
+        driver
+        console
+        esp_system
+)
